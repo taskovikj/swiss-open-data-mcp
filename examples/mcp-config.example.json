@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "swissdatamcp": {
+      "command": "C:\\\\path\\\\to\\\\swiss-open-data-mcp\\\\.venv\\\\Scripts\\\\swissdatamcp.exe"
+    }
+  }
+}

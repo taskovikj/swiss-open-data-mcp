@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "swissdatamcp"
+version = "0.1.0"
+description = "Local MCP server for exploring Swiss open data with DuckDB analytics."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "SwissDataMCP contributors" }
+]
+keywords = ["mcp", "switzerland", "open-data", "duckdb", "analytics"]
+dependencies = [
+  "mcp>=1.13.0",
+  "httpx>=0.27.0",
+  "duckdb>=1.1.0",
+  "pandas>=2.2.0",
+  "pydantic>=2.8.0",
+  "matplotlib>=3.9.0",
+  "python-slugify>=8.0.4"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "ruff>=0.8.0"
+]
+
+[project.scripts]
+swissdatamcp = "swissdatamcp.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/swissdatamcp"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
