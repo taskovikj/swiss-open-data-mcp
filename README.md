@@ -39,6 +39,14 @@ The package provides a local data and analytics layer for MCP-compatible clients
 
 ## Installation
 
+Install directly from Git:
+
+```powershell
+python -m pip install git+https://github.com/taskovikj/swiss-open-data-mcp.git
+```
+
+Editable local install:
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python -m pip install --upgrade pip
@@ -89,6 +97,12 @@ A generic template is available at:
 
 ```text
 examples/mcp-config.example.json
+```
+
+MCP validation notes are available at:
+
+```text
+docs/mcp-validation.md
 ```
 
 ## Tool Groups

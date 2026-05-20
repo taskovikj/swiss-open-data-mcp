@@ -167,3 +167,5 @@ files that can be served with the CLI.
 
 - MCP tools provide the real data and computations.
 - Charts/reports are generated as local files.
+- MCP validation is covered by `tests/test_mcp_server.py` and
+  `docs/mcp-validation.md`.

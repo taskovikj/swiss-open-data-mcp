@@ -8,6 +8,14 @@
 
 ## Install
 
+Install directly from Git:
+
+```powershell
+python -m pip install git+https://github.com/taskovikj/swiss-open-data-mcp.git
+```
+
+Editable local install:
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python -m pip install --upgrade pip
@@ -48,6 +56,11 @@ The local config can be generated with:
 ```powershell
 .\.venv\Scripts\swissdatamcp config
 ```
+
+Add the generated JSON under the `mcpServers` section of any MCP-compatible
+client configuration. The `command` value should point to the installed
+`swissdatamcp` executable or to `python -m swissdatamcp.server` depending on the
+environment.
 
 ## Diagnostics
 

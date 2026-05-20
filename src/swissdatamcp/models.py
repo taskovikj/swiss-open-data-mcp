@@ -58,6 +58,7 @@ class TableReference(BaseModel):
     row_count: int | None = None
     column_count: int | None = None
     columns: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class AnalysisResult(BaseModel):
@@ -92,4 +93,3 @@ class ReportResult(BaseModel):
     title: str
     table_name: str | None = None
     chart_path: str | None = None
-

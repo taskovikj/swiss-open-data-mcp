@@ -100,3 +100,29 @@ def test_session_heatmap_chart(tmp_path):
     assert chart["series_column"] == "correlation"
     assert rendered["chart_count"] == 1
     assert '"chart_type": "heatmap"' in html
+
+
+def test_birth_chart_labels_are_readable(tmp_path):
+    settings = make_settings(tmp_path)
+    csv_path = tmp_path / "births.csv"
+    csv_path.write_text(
+        "AGE_MOTHER,OBS_VALUE\nY30T34,31000\nY35T39,22000\n",
+        encoding="utf-8",
+    )
+    store = DataStore(settings)
+    store.load_file_as_table(csv_path, table_name="births")
+    service = SessionService(settings, store)
+
+    session = service.create_session("Births", session_id="births")
+    chart = service.add_chart(
+        session_id=session["id"],
+        table_name="births",
+        title="Births by mother age",
+        chart_type="bar",
+        x_column="AGE_MOTHER",
+        y_column="OBS_VALUE",
+    )
+
+    assert chart["column_labels"]["AGE_MOTHER"] == "Mother age group"
+    assert chart["column_labels"]["OBS_VALUE"] == "Live births"
+    assert chart["value_labels"]["AGE_MOTHER"]["Y30T34"] == "30-34 years"

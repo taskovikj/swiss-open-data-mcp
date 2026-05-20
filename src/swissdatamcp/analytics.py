@@ -323,6 +323,21 @@ class AnalyticsService:
                 }
             )
 
+        if primary["canton_column"]:
+            recommendations.append(
+                {
+                    "kind": "canton_bar",
+                    "title": f"{readable_column_label(primary['metric_column'] or 'Records')} by canton",
+                    "chart_type": "bar",
+                    "source_table": table_name,
+                    "canton_column": primary["canton_column"],
+                    "value_column": primary["metric_column"],
+                    "aggregation": "sum" if primary["metric_column"] else "count",
+                    "why": "The table has a detected canton column.",
+                    "next_tool": "normalize_canton_codes",
+                }
+            )
+
         for category in category_columns:
             recommendations.append(
                 {
@@ -456,11 +471,14 @@ class AnalyticsService:
         best_join = join_suggestions["suggestions"][0] if join_suggestions["suggestions"] else None
         left_profile = self.profile_dataset(left_table, max_columns=80, top_k=5)
         right_profile = self.profile_dataset(right_table, max_columns=80, top_k=5)
+        left_time = left_profile["semantics"]["primary"]["time_column"]
+        right_time = right_profile["semantics"]["primary"]["time_column"]
         left_join = left_join_column or (best_join or {}).get("left_column")
         right_join = right_join_column or (best_join or {}).get("right_column")
         left_metric = left_value_column or left_profile["semantics"]["primary"]["metric_column"]
         right_metric = right_value_column or right_profile["semantics"]["primary"]["metric_column"]
         issues: list[str] = []
+        warnings: list[str] = []
         if not left_join or not right_join:
             issues.append("No join key was detected. Pass join columns explicitly.")
         if not left_metric:
@@ -487,6 +505,26 @@ class AnalyticsService:
             if join_rows < 2:
                 issues.append("The selected join and metric columns produce fewer than two complete rows.")
 
+        time_ranges = {"left": None, "right": None}
+        if left_time:
+            time_ranges["left"] = self._time_range(left_table, left_time)
+        if right_time:
+            time_ranges["right"] = self._time_range(right_table, right_time)
+        if time_ranges["left"] and time_ranges["right"]:
+            left_range = time_ranges["left"]
+            right_range = time_ranges["right"]
+            left_min = str(left_range["min"])
+            left_max = str(left_range["max"])
+            right_min = str(right_range["min"])
+            right_max = str(right_range["max"])
+            if left_max != right_max:
+                warnings.append(
+                    f"Cross-year comparison: {left_table} latest {left_max} "
+                    f"but {right_table} latest {right_max}."
+                )
+            if left_max < right_min or right_max < left_min:
+                warnings.append("The detected time ranges do not overlap.")
+
         return {
             "left_table": left_table,
             "right_table": right_table,
@@ -494,8 +532,11 @@ class AnalyticsService:
             "join_columns": {"left": left_join, "right": right_join},
             "value_columns": {"left": left_metric, "right": right_metric},
             "join_rows": join_rows,
+            "time_columns": {"left": left_time, "right": right_time},
+            "time_ranges": time_ranges,
             "join_suggestions": join_suggestions["suggestions"],
             "issues": issues,
+            "warnings": warnings,
             "recommended_next_tool": "compare_datasets" if not issues else None,
             "caveats": [
                 "Check whether the two metrics refer to the same time period.",
@@ -1570,6 +1611,25 @@ class AnalyticsService:
             ).fetchall()
         return {str(row[0]).strip().upper() for row in rows if str(row[0]).strip()}
 
+    def _time_range(self, table_name: str, column: str) -> dict[str, Any]:
+        with self.store.connect() as connection:
+            ensure_table_exists(connection, table_name)
+            row = connection.execute(
+                f"""
+                SELECT MIN({quote_identifier(column)}) AS min_value,
+                       MAX({quote_identifier(column)}) AS max_value,
+                       COUNT(DISTINCT {quote_identifier(column)}) AS distinct_count
+                FROM "{table_name}"
+                WHERE {quote_identifier(column)} IS NOT NULL
+                """
+            ).fetchone()
+        return {
+            "column": column,
+            "min": row[0],
+            "max": row[1],
+            "distinct_count": row[2],
+        }
+
     def _granularity_summary(self, table_name: str | None, dimensions: list[str] | None) -> dict[str, Any] | None:
         if not table_name:
             return None
@@ -1633,16 +1693,21 @@ class AnalyticsService:
         for table_name in table_names or []:
             table = table_lookup.get(table_name)
             if table:
+                metadata = table.get("metadata") or {}
                 citations.append(
                     {
                         "kind": "local_table",
                         "table_name": table_name,
+                        "title": metadata.get("dataset_title"),
+                        "publisher": metadata.get("publisher"),
                         "dataset_id": table.get("dataset_id"),
+                        "dataset_url": metadata.get("dataset_url"),
                         "resource_id": table.get("resource_id"),
+                        "resource_name": metadata.get("resource_name"),
                         "source_url": table.get("source_url"),
                         "local_path": table.get("local_path"),
                         "row_count": table.get("row_count"),
-                        "accessed_at": datetime.now(UTC).date().isoformat(),
+                        "accessed_at": table.get("accessed_at") or datetime.now(UTC).date().isoformat(),
                     }
                 )
         if session_id:
@@ -1652,15 +1717,21 @@ class AnalyticsService:
             for chart in manifest.get("charts", []):
                 table = table_lookup.get(chart.get("table_name"))
                 if table:
+                    metadata = table.get("metadata") or {}
                     citations.append(
                         {
                             "kind": "chart_table",
                             "chart_id": chart.get("id"),
                             "chart_title": chart.get("title"),
                             "table_name": table["table_name"],
+                            "title": metadata.get("dataset_title"),
+                            "publisher": metadata.get("publisher"),
                             "dataset_id": table.get("dataset_id"),
+                            "dataset_url": metadata.get("dataset_url"),
                             "resource_id": table.get("resource_id"),
+                            "resource_name": metadata.get("resource_name"),
                             "source_url": table.get("source_url"),
+                            "accessed_at": table.get("accessed_at"),
                         }
                     )
         pack = {

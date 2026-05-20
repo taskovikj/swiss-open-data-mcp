@@ -263,12 +263,23 @@ class SessionService:
     def _table_provenance(self, table_name: str) -> dict[str, Any]:
         for table in self.store.list_tables():
             if table.get("table_name") == table_name:
+                metadata = table.get("metadata") or {}
                 return {
                     "table_name": table_name,
                     "dataset_id": table.get("dataset_id"),
+                    "dataset_title": metadata.get("dataset_title"),
+                    "publisher": metadata.get("publisher"),
+                    "dataset_url": metadata.get("dataset_url"),
+                    "license": metadata.get("license"),
                     "resource_id": table.get("resource_id"),
+                    "resource_name": metadata.get("resource_name"),
+                    "resource_format": metadata.get("resource_format"),
+                    "resource_modified": metadata.get("resource_modified"),
                     "source_url": table.get("source_url"),
+                    "local_path": table.get("local_path"),
                     "row_count": table.get("row_count"),
+                    "loaded_at": table.get("loaded_at"),
+                    "accessed_at": table.get("accessed_at"),
                 }
         return {"table_name": table_name}
 
@@ -563,8 +574,12 @@ class SessionService:
     function sourceProofHtml(chart) {{
       const source = chart.provenance || {{}};
       const parts = [];
-      if (source.dataset_id) parts.push(`Dataset: ${{escapeHtml(source.dataset_id)}}`);
-      if (source.resource_id) parts.push(`Resource: ${{escapeHtml(source.resource_id)}}`);
+      if (source.dataset_title) parts.push(`Dataset: ${{escapeHtml(source.dataset_title)}}`);
+      else if (source.dataset_id) parts.push(`Dataset: ${{escapeHtml(source.dataset_id)}}`);
+      if (source.publisher) parts.push(`Publisher: ${{escapeHtml(source.publisher)}}`);
+      if (source.resource_name) parts.push(`Resource: ${{escapeHtml(source.resource_name)}}`);
+      else if (source.resource_id) parts.push(`Resource: ${{escapeHtml(source.resource_id)}}`);
+      if (source.accessed_at) parts.push(`Accessed: ${{escapeHtml(source.accessed_at)}}`);
       if (source.row_count != null) parts.push(`Rows: ${{formatNumber(source.row_count)}}`);
       const sourceText = parts.length ? parts.join(" | ") : `Table: ${{escapeHtml(chart.table_name)}}`;
       if (source.source_url && /^https?:\\/\\//i.test(source.source_url)) {{
@@ -600,18 +615,24 @@ class SessionService:
       const y = columnLabel(chart, chart.y_column);
       const series = chart.series_column ? columnLabel(chart, chart.series_column) : "";
       if (chart.chart_type === "heatmap") {{
-        return `${{series}} compares ${{x}} with ${{y}}. Red means positive correlation, blue means negative correlation, yellow is close to zero. Correlation is not causation.`;
+        return `${{series}} compares ${{x}} with ${{y}}. Unit is Pearson r from -1 to 1. Red means positive correlation, blue means negative correlation, yellow is close to zero. Correlation is not causation.`;
       }}
       if (chart.chart_type === "map") {{
-        return `Map points show records with ${{x}} and ${{y}} coordinates${{series ? `, grouped by ${{series}}` : ""}}. Hover a point to inspect the exact value.`;
+        return `Map points show ${{x}} and ${{y}} coordinates${{series ? `, grouped by ${{series}}` : ""}}. Check coordinate coverage before treating missing points as absence.`;
       }}
       if (chart.chart_type === "bar") {{
-        return `Bars compare ${{y}} across ${{x}}. Taller bars mean larger values.`;
+        return `Bars compare ${{y}} across ${{x}}. Unit follows the source table. Use normalized rates before comparing places with different population sizes.`;
       }}
       if (chart.chart_type === "line") {{
-        return `Line chart of ${{y}} over ${{x}}. The slope shows whether the value is rising or falling.`;
+        return `Line chart of ${{y}} over ${{x}}. Unit follows the source table. Check date filters and breaks before reading the slope as a trend.`;
       }}
-      return `Scatter plot comparing ${{x}} and ${{y}}${{series ? `, grouped by ${{series}}` : ""}}.`;
+      return `Scatter plot comparing ${{x}} and ${{y}}${{series ? `, grouped by ${{series}}` : ""}}. Units follow the source table. Correlation is not causation.`;
+    }}
+
+    function chartUnit(chart) {{
+      if (chart.chart_type === "heatmap") return "Pearson r";
+      if (chart.chart_type === "map") return "Coordinates";
+      return "Source table";
     }}
 
     function chartMetricPills(chart) {{
@@ -631,6 +652,7 @@ class SessionService:
       return [
         ["Type", typeLabel],
         ["Metric", metric],
+        ["Unit", chartUnit(chart)],
         ["Rows shown", formatNumber(rows.length)],
         ["Limit", formatNumber(chart.limit || rows.length)]
       ];

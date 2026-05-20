@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -76,6 +77,7 @@ class DataStore:
         source_url: str | None = None,
         table_name: str | None = None,
         format_hint: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> TableReference:
         """Load a local CSV/JSON/Parquet file into DuckDB and return a table reference."""
 
@@ -116,6 +118,7 @@ class DataStore:
                 str(path),
                 row_count,
                 columns,
+                metadata,
             )
 
         return TableReference(
@@ -127,6 +130,7 @@ class DataStore:
             row_count=row_count,
             column_count=len(columns),
             columns=columns,
+            metadata=metadata or {},
         )
 
     def inspect_table(self, table_name: str, sample_rows: int = 10) -> dict[str, Any]:
@@ -157,23 +161,38 @@ class DataStore:
             self._ensure_metadata_table(connection)
             rows = connection.execute(
                 """
-                SELECT table_name, dataset_id, resource_id, source_url, local_path, row_count, columns_json
+                SELECT table_name,
+                       dataset_id,
+                       resource_id,
+                       source_url,
+                       local_path,
+                       row_count,
+                       columns_json,
+                       loaded_at,
+                       metadata_json
                 FROM swissdatamcp_tables
                 ORDER BY loaded_at DESC
                 """
             ).fetchall()
-        return [
-            {
-                "table_name": row[0],
-                "dataset_id": row[1],
-                "resource_id": row[2],
-                "source_url": row[3],
-                "local_path": row[4],
-                "row_count": row[5],
-                "columns": json.loads(row[6] or "[]"),
-            }
-            for row in rows
-        ]
+        tables = []
+        for row in rows:
+            metadata = parse_metadata(row[8])
+            loaded_at = row[7].isoformat() if hasattr(row[7], "isoformat") else str(row[7])
+            tables.append(
+                {
+                    "table_name": row[0],
+                    "dataset_id": row[1],
+                    "resource_id": row[2],
+                    "source_url": row[3],
+                    "local_path": row[4],
+                    "row_count": row[5],
+                    "columns": json.loads(row[6] or "[]"),
+                    "loaded_at": loaded_at,
+                    "accessed_at": metadata.get("accessed_at") or loaded_at,
+                    "metadata": metadata,
+                }
+            )
+        return tables
 
     def query_table(
         self,
@@ -379,10 +398,17 @@ class DataStore:
               local_path VARCHAR,
               row_count BIGINT,
               columns_json VARCHAR,
+              metadata_json VARCHAR,
               loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        existing = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info('swissdatamcp_tables')").fetchall()
+        }
+        if "metadata_json" not in existing:
+            connection.execute("ALTER TABLE swissdatamcp_tables ADD COLUMN metadata_json VARCHAR")
 
     def _upsert_table_metadata(
         self,
@@ -394,15 +420,40 @@ class DataStore:
         local_path: str,
         row_count: int,
         columns: list[str],
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         self._ensure_metadata_table(connection)
+        metadata_payload = {
+            **(metadata or {}),
+            "accessed_at": (metadata or {}).get("accessed_at")
+            or datetime.now(UTC).isoformat(timespec="seconds"),
+        }
         connection.execute(
             """
             INSERT OR REPLACE INTO swissdatamcp_tables
-            (table_name, dataset_id, resource_id, source_url, local_path, row_count, columns_json, loaded_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            (
+              table_name,
+              dataset_id,
+              resource_id,
+              source_url,
+              local_path,
+              row_count,
+              columns_json,
+              metadata_json,
+              loaded_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             """,
-            [table_name, dataset_id, resource_id, source_url, local_path, row_count, json.dumps(columns)],
+            [
+                table_name,
+                dataset_id,
+                resource_id,
+                source_url,
+                local_path,
+                row_count,
+                json.dumps(columns),
+                json.dumps(metadata_payload, ensure_ascii=False, default=str),
+            ],
         )
 
 
@@ -414,6 +465,18 @@ def make_table_name(dataset_id: str, resource_id: str) -> str:
     if not base or base[0].isdigit():
         base = f"t_{base}"
     return base[:60]
+
+
+def parse_metadata(metadata_json: str | None) -> dict[str, Any]:
+    """Parse table metadata JSON, returning an empty dict on old rows."""
+
+    if not metadata_json:
+        return {}
+    try:
+        data = json.loads(metadata_json)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def ensure_table_exists(connection: duckdb.DuckDBPyConnection, table_name: str) -> None:

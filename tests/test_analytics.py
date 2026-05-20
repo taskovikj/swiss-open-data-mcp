@@ -33,8 +33,8 @@ def make_service(tmp_path):
         "\n".join(
             [
                 "year,canton,gemeinde,population",
-                "2024,TG,Eschenz,1800",
-                "2024,TG,Arbon,15000",
+                "2025,TG,Eschenz,1800",
+                "2025,TG,Arbon,15000",
             ]
         ),
         encoding="utf-8",
@@ -86,6 +86,8 @@ def test_dashboard_map_time_correlation_and_export(tmp_path):
     assert series["output_table"] == "sample_year_series"
     assert outliers["outlier_count"] >= 1
     assert citations["citation_count"] >= 1
+    assert citations["citations"][0]["table_name"] == "sample"
+    assert "accessed_at" in citations["citations"][0]
     assert (settings.sessions_dir / "sample-dashboard" / "index.html").exists()
     assert bundle["zip_path"].endswith(".zip")
 
@@ -121,6 +123,7 @@ def test_recommend_join_normalize_matrix_and_rates(tmp_path):
     assert any(item["left_column"] == "gemeinde" for item in joins["suggestions"])
     assert granularity["left"]["dimension_key_unique"] is False
     assert readiness["can_correlate"] is True
+    assert "Cross-year comparison" in readiness["warnings"][0]
     assert normalized["matched_rows"] == 3
     assert matrix["row_count"] == 9
     assert rates["row_count"] == 2

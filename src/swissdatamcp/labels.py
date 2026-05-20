@@ -12,9 +12,9 @@ COMMON_COLUMN_LABELS = {
     "kanton": "Canton",
     "canton_code": "Canton code",
     "kt": "Canton",
-    "age_mother": "Mother's age band",
+    "age_mother": "Mother age group",
     "sex_child": "Child sex",
-    "obs_value": "Observed value",
+    "obs_value": "Value",
     "record_count": "Records",
     "lat": "Latitude",
     "latitude": "Latitude",
@@ -32,18 +32,18 @@ COMMON_COLUMN_LABELS = {
 
 AGE_MOTHER_LABELS = {
     "_T": "Total",
-    "Y10T14": "10 to 14 years",
-    "Y15T19": "15 to 19 years",
-    "Y20T24": "20 to 24 years",
-    "Y25T29": "25 to 29 years",
-    "Y30T34": "30 to 34 years",
-    "Y35T39": "35 to 39 years",
-    "Y40T44": "40 to 44 years",
-    "Y45T49": "45 to 49 years",
-    "Y50T54": "50 to 54 years",
-    "Y55T59": "55 to 59 years",
-    "Y60T64": "60 to 64 years",
-    "Y65T69": "65 to 69 years",
+    "Y10T14": "10-14 years",
+    "Y15T19": "15-19 years",
+    "Y20T24": "20-24 years",
+    "Y25T29": "25-29 years",
+    "Y30T34": "30-34 years",
+    "Y35T39": "35-39 years",
+    "Y40T44": "40-44 years",
+    "Y45T49": "45-49 years",
+    "Y50T54": "50-54 years",
+    "Y55T59": "55-59 years",
+    "Y60T64": "60-64 years",
+    "Y65T69": "65-69 years",
 }
 
 
@@ -136,7 +136,13 @@ def readable_column_label(column: str) -> str:
 def automatic_column_labels(columns: list[str | None]) -> dict[str, str]:
     """Return labels for columns with known or readable names."""
 
-    return {column: readable_column_label(column) for column in columns if column}
+    labels = {column: readable_column_label(column) for column in columns if column}
+    normalized = {normalize_label_key(column) for column in columns if column}
+    if "obs_value" in normalized and normalized & {"age_mother", "sex_child"}:
+        for column in columns:
+            if column and normalize_label_key(column) == "obs_value":
+                labels[column] = "Live births"
+    return labels
 
 
 def automatic_value_labels(columns: list[str | None]) -> dict[str, dict[str, str]]:

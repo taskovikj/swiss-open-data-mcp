@@ -265,6 +265,16 @@ async def load_dataset_resource(
             source_url=url,
             table_name=table_name,
             format_hint=resource.format,
+            metadata={
+                "dataset_title": dataset.title,
+                "publisher": dataset.organization,
+                "dataset_url": dataset.url,
+                "license": dataset.license,
+                "resource_name": resource.name,
+                "resource_format": resource.format,
+                "resource_modified": resource.modified,
+                "source_type": "opendata.swiss",
+            },
         )
         return table.model_dump()
     except StoreError as exc:
@@ -293,6 +303,7 @@ async def load_resource_url(
             source_url=url,
             table_name=table_name,
             format_hint=format_hint,
+            metadata={"source_type": "direct_url"},
         )
         return table.model_dump()
     except StoreError as exc:
@@ -924,6 +935,8 @@ async def create_report(
         dataset = await _dataset_or_error(citation_dataset_id)
         resource = _select_resource(dataset, resource_id=citation_resource_id, resource_index=None)
         citation = dataset_citation(dataset, resource)
+    elif table_name:
+        citation = local_table_citation(table_name)
 
     try:
         result = reports.create_report(
@@ -1244,6 +1257,27 @@ def resource_from_dict(resource: dict[str, Any]) -> ResourceSummary:
     """Rehydrate a resource dict returned by search into the typed resource model."""
 
     return ResourceSummary.model_validate(resource)
+
+
+def local_table_citation(table_name: str) -> dict[str, Any]:
+    """Build citation metadata from the local table registry."""
+
+    for table in store.list_tables():
+        if table.get("table_name") == table_name:
+            metadata = table.get("metadata") or {}
+            return {
+                "title": metadata.get("dataset_title"),
+                "publisher": metadata.get("publisher"),
+                "dataset_id": table.get("dataset_id"),
+                "dataset_url": metadata.get("dataset_url"),
+                "resource_id": table.get("resource_id"),
+                "resource_name": metadata.get("resource_name"),
+                "resource_url": table.get("source_url"),
+                "local_table": table_name,
+                "local_path": table.get("local_path"),
+                "accessed_at": table.get("accessed_at"),
+            }
+    return {"local_table": table_name}
 
 
 def tool_guide_payload() -> dict[str, Any]:

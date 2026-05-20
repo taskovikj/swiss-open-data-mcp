@@ -17,10 +17,25 @@ def test_load_and_analyze_csv(tmp_path):
     csv_path.write_text("year,canton,value\n2000,Zurich,10\n2001,Zurich,12\n", encoding="utf-8")
 
     store = DataStore(settings)
-    table = store.load_file_as_table(csv_path, dataset_id="test", resource_id="sample")
+    table = store.load_file_as_table(
+        csv_path,
+        dataset_id="test",
+        resource_id="sample",
+        source_url="https://example.test/sample.csv",
+        metadata={
+            "dataset_title": "Sample dataset",
+            "publisher": "Sample publisher",
+            "resource_name": "Sample resource",
+        },
+    )
     analysis = store.analyze_table(table.table_name)
+    tables = store.list_tables()
 
     assert table.row_count == 2
+    assert table.metadata["dataset_title"] == "Sample dataset"
+    assert tables[0]["metadata"]["publisher"] == "Sample publisher"
+    assert tables[0]["source_url"] == "https://example.test/sample.csv"
+    assert tables[0]["accessed_at"]
     assert "year" in table.columns
     assert analysis.row_count == 2
     assert "value" in analysis.numeric_columns
