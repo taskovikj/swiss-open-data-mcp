@@ -14,6 +14,12 @@ python -m venv .venv
 .\.venv\Scripts\python -m pip install -e .
 ```
 
+Development install with validation tools:
+
+```powershell
+.\.venv\Scripts\python -m pip install -e ".[dev]"
+```
+
 ## Server Command
 
 The package exposes a stdio MCP server through the `swissdatamcp` console
@@ -51,6 +57,13 @@ The local config can be generated with:
 
 The diagnostic command prints package version, local runtime paths, and the
 MCP configuration snippet for the current installation.
+
+## Validation
+
+```powershell
+.\.venv\Scripts\python -m pytest
+.\.venv\Scripts\python -m ruff check src tests
+```
 
 ## Local Dashboard Server
 

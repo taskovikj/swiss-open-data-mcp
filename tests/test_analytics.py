@@ -20,16 +20,28 @@ def make_service(tmp_path):
     csv_path.write_text(
         "\n".join(
             [
-                "year,gemeinde,epoche,lon,lat,value",
-                "2023,Eschenz,Roman,8.9,47.6,10",
-                "2024,Eschenz,Bronze,8.91,47.61,14",
-                "2024,Arbon,Roman,9.4,47.5,5",
+                "year,canton,gemeinde,epoche,lon,lat,value",
+                "2023,TG,Eschenz,Roman,8.9,47.6,10",
+                "2024,TG,Eschenz,Bronze,8.91,47.61,14",
+                "2024,TG,Arbon,Roman,9.4,47.5,5",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    population_path = tmp_path / "population.csv"
+    population_path.write_text(
+        "\n".join(
+            [
+                "year,canton,gemeinde,population",
+                "2024,TG,Eschenz,1800",
+                "2024,TG,Arbon,15000",
             ]
         ),
         encoding="utf-8",
     )
     store = DataStore(settings)
     store.load_file_as_table(csv_path, table_name="sample")
+    store.load_file_as_table(population_path, table_name="population")
     sessions = SessionService(settings, store)
     return settings, store, sessions, AnalyticsService(settings, store, sessions)
 
@@ -76,6 +88,43 @@ def test_dashboard_map_time_correlation_and_export(tmp_path):
     assert citations["citation_count"] >= 1
     assert (settings.sessions_dir / "sample-dashboard" / "index.html").exists()
     assert bundle["zip_path"].endswith(".zip")
+
+
+def test_recommend_join_normalize_matrix_and_rates(tmp_path):
+    _, _, sessions, analytics = make_service(tmp_path)
+
+    recommendations = analytics.recommend_charts_for_table("sample")
+    joins = analytics.suggest_join_keys("sample", "population")
+    granularity = analytics.compare_table_granularity("sample", "population", dimensions=["gemeinde"])
+    readiness = analytics.can_correlate_tables(
+        "sample",
+        "population",
+        left_join_column="gemeinde",
+        right_join_column="gemeinde",
+        left_value_column="value",
+        right_value_column="population",
+    )
+    normalized = analytics.normalize_canton_codes("sample", canton_column="canton")
+    matrix = analytics.correlation_matrix_analysis("sample", numeric_columns=["lon", "lat", "value"])
+    session = sessions.create_session("Rates", session_id="rates")
+    rates = analytics.calculate_per_capita_metric(
+        numerator_table="sample",
+        denominator_table="population",
+        numerator_join_column="gemeinde",
+        denominator_join_column="gemeinde",
+        numerator_value_column="value",
+        denominator_value_column="population",
+        session_id=session["id"],
+    )
+
+    assert any(item["kind"] == "map" for item in recommendations["recommendations"])
+    assert any(item["left_column"] == "gemeinde" for item in joins["suggestions"])
+    assert granularity["left"]["dimension_key_unique"] is False
+    assert readiness["can_correlate"] is True
+    assert normalized["matched_rows"] == 3
+    assert matrix["row_count"] == 9
+    assert rates["row_count"] == 2
+    assert rates["chart"]["chart_type"] == "bar"
 
 
 def test_rank_resource_prefers_parquet():

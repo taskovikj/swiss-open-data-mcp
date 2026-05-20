@@ -78,6 +78,18 @@ Responsibilities:
 - return chart-ready preview rows
 - support lightweight static artifacts for reports
 
+### Label Helpers
+
+File:
+
+- `src/swissdatamcp/labels.py`
+
+Responsibilities:
+
+- convert technical column names into readable labels
+- label common Swiss statistical codes such as canton, child sex, and age bands
+- normalize canton code, abbreviation, and name variants
+
 ### Report Service
 
 File:
@@ -103,7 +115,23 @@ Responsibilities:
 - render interactive Plotly dashboards
 - render line, bar, scatter, map, and heatmap cards
 - add readable chart explanations, metric pills, labels, and hover values
+- show source table metadata and source URLs on chart cards where available
 - store advanced analysis results
+
+### Compatibility and Planning Helpers
+
+File:
+
+- `src/swissdatamcp/analytics.py`
+
+Responsibilities:
+
+- recommend useful chart types from schema semantics
+- suggest join keys between two local tables
+- compare table granularity and duplicate dimension groups
+- check whether two tables are ready for joined correlation
+- calculate normalized per-capita/rate metrics
+- generate long-form correlation matrices for heatmap rendering
 
 ### Citation Helpers
 

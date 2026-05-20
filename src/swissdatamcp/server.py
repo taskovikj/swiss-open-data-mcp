@@ -56,7 +56,7 @@ async def catalog_status() -> dict[str, Any]:
 
 @mcp.tool()
 def get_mcp_tool_guide() -> dict[str, Any]:
-    """Return the recommended SwissDataMCP workflow, tool map, and useful prompts."""
+    """Return the recommended SwissDataMCP workflow, tool map, and example requests."""
 
     return tool_guide_payload()
 
@@ -412,6 +412,98 @@ def clean_table_for_analysis(
 
 
 @mcp.tool()
+def recommend_charts_for_table(
+    table_name: str,
+    question: str | None = None,
+    max_recommendations: int = 8,
+) -> dict[str, Any]:
+    """Recommend useful charts and analysis tools for a loaded local table."""
+
+    try:
+        return analytics.recommend_charts_for_table(
+            table_name=table_name,
+            question=question,
+            max_recommendations=max_recommendations,
+        )
+    except (AnalyticsError, StoreError) as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool()
+def suggest_join_keys(left_table: str, right_table: str, max_suggestions: int = 10) -> dict[str, Any]:
+    """Suggest likely join columns between two local DuckDB tables."""
+
+    try:
+        return analytics.suggest_join_keys(
+            left_table=left_table,
+            right_table=right_table,
+            max_suggestions=max_suggestions,
+        )
+    except (AnalyticsError, StoreError) as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool()
+def compare_table_granularity(
+    left_table: str,
+    right_table: str | None = None,
+    dimensions: list[str] | None = None,
+) -> dict[str, Any]:
+    """Describe and compare row grain, dimensions, and duplicate groups."""
+
+    try:
+        return analytics.compare_table_granularity(
+            left_table=left_table,
+            right_table=right_table,
+            dimensions=dimensions,
+        )
+    except (AnalyticsError, StoreError) as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool()
+def can_correlate_tables(
+    left_table: str,
+    right_table: str,
+    left_join_column: str | None = None,
+    right_join_column: str | None = None,
+    left_value_column: str | None = None,
+    right_value_column: str | None = None,
+) -> dict[str, Any]:
+    """Check whether two tables have join keys and metrics suitable for correlation."""
+
+    try:
+        return analytics.can_correlate_tables(
+            left_table=left_table,
+            right_table=right_table,
+            left_join_column=left_join_column,
+            right_join_column=right_join_column,
+            left_value_column=left_value_column,
+            right_value_column=right_value_column,
+        )
+    except (AnalyticsError, StoreError) as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool()
+def normalize_canton_codes(
+    table_name: str,
+    canton_column: str | None = None,
+    output_table_name: str | None = None,
+) -> dict[str, Any]:
+    """Create a derived table with normalized Swiss canton code, abbreviation, and name."""
+
+    try:
+        return analytics.normalize_canton_codes(
+            table_name=table_name,
+            canton_column=canton_column,
+            output_table_name=output_table_name,
+        )
+    except (AnalyticsError, StoreError) as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool()
 def create_analysis_plan(
     question: str,
     table_name: str | None = None,
@@ -581,6 +673,38 @@ def compare_datasets(
 
 
 @mcp.tool()
+def calculate_per_capita_metric(
+    numerator_table: str,
+    denominator_table: str,
+    numerator_join_column: str,
+    denominator_join_column: str,
+    numerator_value_column: str,
+    denominator_value_column: str,
+    multiplier: float = 100000.0,
+    output_table_name: str | None = None,
+    session_id: str | None = None,
+    title: str | None = None,
+) -> dict[str, Any]:
+    """Calculate a normalized rate by joining numerator and denominator tables."""
+
+    try:
+        return analytics.calculate_per_capita_metric(
+            numerator_table=numerator_table,
+            denominator_table=denominator_table,
+            numerator_join_column=numerator_join_column,
+            denominator_join_column=denominator_join_column,
+            numerator_value_column=numerator_value_column,
+            denominator_value_column=denominator_value_column,
+            multiplier=multiplier,
+            output_table_name=output_table_name,
+            session_id=session_id,
+            title=title,
+        )
+    except (AnalyticsError, StoreError, SessionError) as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool()
 def correlation_analysis(
     table_name: str,
     x_column: str,
@@ -599,6 +723,30 @@ def correlation_analysis(
             x_column=x_column,
             y_column=y_column,
             group_column=group_column,
+            filters=filters,
+            output_table_name=output_table_name,
+            session_id=session_id,
+            title=title,
+        )
+    except (AnalyticsError, StoreError, SessionError) as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool()
+def correlation_matrix_analysis(
+    table_name: str,
+    numeric_columns: list[str] | None = None,
+    filters: dict[str, Any] | None = None,
+    output_table_name: str | None = None,
+    session_id: str | None = None,
+    title: str | None = None,
+) -> dict[str, Any]:
+    """Create a Pearson correlation matrix table and optional heatmap chart."""
+
+    try:
+        return analytics.correlation_matrix_analysis(
+            table_name=table_name,
+            numeric_columns=numeric_columns,
             filters=filters,
             output_table_name=output_table_name,
             session_id=session_id,
@@ -1120,8 +1268,24 @@ def tool_guide_payload() -> dict[str, Any]:
             },
             {
                 "step": "Load and inspect",
-                "tools": ["load_dataset_resource", "inspect_local_table", "profile_dataset"],
+                "tools": [
+                    "load_dataset_resource",
+                    "inspect_local_table",
+                    "profile_dataset",
+                    "detect_schema_semantics",
+                    "normalize_canton_codes",
+                ],
                 "success_check": "The local DuckDB table has expected rows, columns, dates, categories, and metrics.",
+            },
+            {
+                "step": "Plan compatibility",
+                "tools": [
+                    "recommend_charts_for_table",
+                    "suggest_join_keys",
+                    "compare_table_granularity",
+                    "can_correlate_tables",
+                ],
+                "success_check": "Useful charts, join keys, table grain, and correlation readiness are known.",
             },
             {
                 "step": "Analyze",
@@ -1130,6 +1294,8 @@ def tool_guide_payload() -> dict[str, Any]:
                     "answer_from_table",
                     "time_series_analysis",
                     "correlation_analysis",
+                    "correlation_matrix_analysis",
+                    "calculate_per_capita_metric",
                     "outlier_detection",
                     "compare_datasets",
                 ],

@@ -12,6 +12,7 @@ from typing import Any
 from slugify import slugify
 
 from swissdatamcp.config import Settings
+from swissdatamcp.labels import automatic_column_labels, automatic_value_labels
 from swissdatamcp.store import DataStore
 
 
@@ -109,6 +110,7 @@ class SessionService:
             raise SessionError("heatmap charts require series_column to contain the cell value.")
 
         self._validate_table_columns(table_name, [x_column, y_column, series_column])
+        label_columns = [x_column, y_column, series_column]
         manifest = self.load_session(session_id)
         chart = {
             "id": f"{slugify(title)[:40] or 'chart'}-{uuid.uuid4().hex[:8]}",
@@ -120,8 +122,9 @@ class SessionService:
             "series_column": series_column,
             "filters": filters or {},
             "limit": max(1, min(limit, 5000)),
-            "value_labels": value_labels or {},
-            "column_labels": column_labels or {},
+            "value_labels": deep_merge(automatic_value_labels(label_columns), value_labels or {}),
+            "column_labels": {**automatic_column_labels(label_columns), **(column_labels or {})},
+            "provenance": self._table_provenance(table_name),
             "created_at": utc_now(),
         }
         manifest["charts"].append(chart)
@@ -165,6 +168,16 @@ class SessionService:
                     chart["table_name"],
                     [chart["x_column"], chart["y_column"], chart.get("series_column")],
                 )
+                label_columns = [chart["x_column"], chart["y_column"], chart.get("series_column")]
+                chart["value_labels"] = deep_merge(
+                    automatic_value_labels(label_columns),
+                    chart.get("value_labels") or {},
+                )
+                chart["column_labels"] = {
+                    **automatic_column_labels(label_columns),
+                    **(chart.get("column_labels") or {}),
+                }
+                chart["provenance"] = self._table_provenance(chart["table_name"])
                 chart["updated_at"] = utc_now()
                 self._touch_and_save(manifest)
                 return chart
@@ -238,7 +251,7 @@ class SessionService:
             filters=chart.get("filters") or {},
             limit=int(chart.get("limit") or 1000),
         )
-        return {**chart, "rows": data["rows"]}
+        return {**chart, "provenance": chart.get("provenance") or self._table_provenance(chart["table_name"]), "rows": data["rows"]}
 
     def _validate_table_columns(self, table_name: str, columns: list[str | None]) -> None:
         schema = self.store.inspect_table(table_name, sample_rows=1)
@@ -246,6 +259,18 @@ class SessionService:
         missing = [column for column in columns if column and column not in available]
         if missing:
             raise SessionError(f"Unknown columns for table '{table_name}': {missing}")
+
+    def _table_provenance(self, table_name: str) -> dict[str, Any]:
+        for table in self.store.list_tables():
+            if table.get("table_name") == table_name:
+                return {
+                    "table_name": table_name,
+                    "dataset_id": table.get("dataset_id"),
+                    "resource_id": table.get("resource_id"),
+                    "source_url": table.get("source_url"),
+                    "row_count": table.get("row_count"),
+                }
+        return {"table_name": table_name}
 
     def _html(self, payload: dict[str, Any]) -> str:
         payload_json = json.dumps(payload, ensure_ascii=False, default=str).replace("</", "<\\/")
@@ -366,6 +391,13 @@ class SessionService:
       font-size: 12px;
       overflow-wrap: anywhere;
     }}
+    .source-proof {{
+      padding: 0 16px 14px;
+      color: var(--muted);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }}
+    .source-proof a {{ color: var(--accent); }}
     .nav-list {{ display: grid; gap: 8px; margin-top: 16px; }}
     .nav-list a {{
       color: var(--ink);
@@ -526,6 +558,19 @@ class SessionService:
         return `${{columnLabel(chart, column)}} ${{readableFilter(chart, value, column)}}`;
       }});
       return parts.length ? parts.join(" | ") : "None";
+    }}
+
+    function sourceProofHtml(chart) {{
+      const source = chart.provenance || {{}};
+      const parts = [];
+      if (source.dataset_id) parts.push(`Dataset: ${{escapeHtml(source.dataset_id)}}`);
+      if (source.resource_id) parts.push(`Resource: ${{escapeHtml(source.resource_id)}}`);
+      if (source.row_count != null) parts.push(`Rows: ${{formatNumber(source.row_count)}}`);
+      const sourceText = parts.length ? parts.join(" | ") : `Table: ${{escapeHtml(chart.table_name)}}`;
+      if (source.source_url && /^https?:\\/\\//i.test(source.source_url)) {{
+        return `${{sourceText}} | <a href="${{escapeHtml(source.source_url)}}" target="_blank" rel="noreferrer">Source URL</a>`;
+      }}
+      return source.source_url ? `${{sourceText}} | Source: ${{escapeHtml(source.source_url)}}` : sourceText;
     }}
 
     function groupedRows(rows, key) {{
@@ -740,6 +785,7 @@ class SessionService:
         <div class="chart-metrics"></div>
         <div class="plot" data-chart-type="${{escapeHtml(chart.chart_type)}}" id="plot-${{chart.id}}"></div>
         <div class="filters"></div>
+        <div class="source-proof"></div>
       `;
       document.getElementById("charts").appendChild(card);
       card.querySelector(".chart-metrics").innerHTML = chartMetricPills(chart)
@@ -748,6 +794,7 @@ class SessionService:
       const plotId = `plot-${{chart.id}}`;
       Plotly.newPlot(plotId, makeTraces(chart), chartLayout(chart), {{ responsive: true, displaylogo: false }});
       card.querySelector(".filters").textContent = `Source table: ${{chart.table_name}} | Filters: ${{readableFilters(chart)}}`;
+      card.querySelector(".source-proof").innerHTML = sourceProofHtml(chart);
       card.querySelector('[data-action="remove"]').addEventListener("click", () => card.remove());
       card.querySelector('[data-action="download"]').addEventListener("click", () => {{
         Plotly.downloadImage(plotId, {{ format: "png", filename: chart.title || chart.id }});
@@ -835,65 +882,3 @@ def deep_merge(
     for key, value in override.items():
         merged.setdefault(key, {}).update(value)
     return merged
-
-
-COMMON_COLUMN_LABELS = {
-    "YEAR": "Year",
-    "CANTON": "Canton",
-    "AGE_MOTHER": "Mother's age band",
-    "SEX_CHILD": "Child sex",
-    "OBS_VALUE": "Live births",
-}
-
-
-COMMON_VALUE_LABELS = {
-    "AGE_MOTHER": {
-        "_T": "Total",
-        "Y10T14": "10 to 14 years",
-        "Y15T19": "15 to 19 years",
-        "Y20T24": "20 to 24 years",
-        "Y25T29": "25 to 29 years",
-        "Y30T34": "30 to 34 years",
-        "Y35T39": "35 to 39 years",
-        "Y40T44": "40 to 44 years",
-        "Y45T49": "45 to 49 years",
-        "Y50T54": "50 to 54 years",
-        "Y55T59": "55 to 59 years",
-        "Y60T64": "60 to 64 years",
-        "Y65T69": "65 to 69 years",
-    },
-    "SEX_CHILD": {
-        "T": "Total",
-        "1": "Male",
-        "2": "Female",
-    },
-    "CANTON": {
-        "1": "Zurich",
-        "2": "Bern",
-        "3": "Luzern",
-        "4": "Uri",
-        "5": "Schwyz",
-        "6": "Obwalden",
-        "7": "Nidwalden",
-        "8": "Glarus",
-        "9": "Zug",
-        "10": "Fribourg",
-        "11": "Solothurn",
-        "12": "Basel-Stadt",
-        "13": "Basel-Landschaft",
-        "14": "Schaffhausen",
-        "15": "Appenzell Ausserrhoden",
-        "16": "Appenzell Innerrhoden",
-        "17": "St. Gallen",
-        "18": "Graubunden",
-        "19": "Aargau",
-        "20": "Thurgau",
-        "21": "Ticino",
-        "22": "Vaud",
-        "23": "Valais",
-        "24": "Neuchatel",
-        "25": "Geneva",
-        "26": "Jura",
-        "CH": "Switzerland",
-    },
-}

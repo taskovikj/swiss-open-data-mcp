@@ -41,8 +41,10 @@ def test_session_add_chart_and_render(tmp_path):
     rendered = service.render(session["id"])
 
     assert chart["title"] == "Zurich births"
-    assert chart["column_labels"] == {}
-    assert chart["value_labels"] == {}
+    assert chart["column_labels"]["year"] == "Year"
+    assert chart["column_labels"]["value"] == "Value"
+    assert chart["value_labels"]["canton"]["ZH"] == "Zurich"
+    assert chart["provenance"]["table_name"] == "sample"
     assert rendered["relative_path"] == "sessions/births-analysis/index.html"
     assert (settings.sessions_dir / "births-analysis" / "index.html").exists()
 

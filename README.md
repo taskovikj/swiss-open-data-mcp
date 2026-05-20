@@ -20,6 +20,15 @@ MCP client
 
 The package provides a local data and analytics layer for MCP-compatible clients.
 
+## Visualization Stack
+
+- DuckDB powers local table queries and derived analysis tables.
+- Plotly.js powers interactive HTML analysis sessions with line, bar, scatter,
+  map, and heatmap cards.
+- Matplotlib powers static PNG chart artifacts for simple reports.
+- Chart manifests store readable column labels, Swiss code value labels, filters,
+  source table metadata, and source URLs when available.
+
 ## Design Principles
 
 - Source data and local table rows are the factual source of truth.
@@ -106,7 +115,15 @@ Data loading and inspection tools:
 - `profile_dataset`
 - `detect_schema_semantics`
 - `clean_table_for_analysis`
+- `normalize_canton_codes`
 - `answer_from_table`
+
+Chart and compatibility planning tools:
+
+- `recommend_charts_for_table`
+- `suggest_join_keys`
+- `compare_table_granularity`
+- `can_correlate_tables`
 
 Interactive analysis tools:
 
@@ -122,7 +139,9 @@ Interactive analysis tools:
 - `create_map_layer`
 - `spatial_summary`
 - `compare_datasets`
+- `calculate_per_capita_metric`
 - `correlation_analysis`
+- `correlation_matrix_analysis`
 - `time_series_analysis`
 - `outlier_detection`
 - `create_analysis_plan`

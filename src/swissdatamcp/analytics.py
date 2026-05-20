@@ -14,6 +14,7 @@ import pandas as pd
 from slugify import slugify
 
 from swissdatamcp.config import Settings
+from swissdatamcp.labels import CANTON_BY_CODE, normalize_label_key, readable_column_label
 from swissdatamcp.sessions import SessionService
 from swissdatamcp.store import DataStore, build_where, dataframe_records, ensure_table_exists
 
@@ -270,6 +271,297 @@ class AnalyticsService:
             "row_count": row_count,
             "column_count": len(columns),
             "column_map": column_map,
+        }
+
+    def recommend_charts_for_table(
+        self,
+        table_name: str,
+        question: str | None = None,
+        max_recommendations: int = 8,
+    ) -> dict[str, Any]:
+        """Suggest useful charts and analysis steps for a loaded table."""
+
+        profile = self.profile_dataset(table_name)
+        semantics = profile["semantics"]
+        primary = semantics["primary"]
+        numeric_columns = [
+            column["name"]
+            for column in profile["columns"]
+            if "metric" in column.get("semantic_roles", []) and column["name"] not in semantics["roles"]["time"]
+        ]
+        category_columns = choose_category_columns(profile, max_columns=4)
+        recommendations: list[dict[str, Any]] = []
+
+        if primary["longitude_column"] and primary["latitude_column"]:
+            recommendations.append(
+                {
+                    "kind": "map",
+                    "title": "Map of records",
+                    "chart_type": "map",
+                    "table_name": table_name,
+                    "x_column": primary["longitude_column"],
+                    "y_column": primary["latitude_column"],
+                    "series_column": primary["category_column"],
+                    "why": "The table has longitude and latitude columns.",
+                    "next_tool": "add_chart_to_session",
+                }
+            )
+
+        if primary["time_column"]:
+            metric = primary["metric_column"]
+            recommendations.append(
+                {
+                    "kind": "time_series",
+                    "title": f"{readable_column_label(metric or 'record_count')} over time",
+                    "chart_type": "line",
+                    "source_table": table_name,
+                    "time_column": primary["time_column"],
+                    "value_column": metric,
+                    "aggregation": "sum" if metric else "count",
+                    "why": "The table has a detected time column.",
+                    "next_tool": "time_series_analysis",
+                }
+            )
+
+        for category in category_columns:
+            recommendations.append(
+                {
+                    "kind": "category_bar",
+                    "title": f"Top {readable_column_label(category)}",
+                    "chart_type": "bar",
+                    "source_table": table_name,
+                    "category_column": category,
+                    "why": "This categorical column has a manageable number of values.",
+                    "next_tool": "create_dashboard_from_question",
+                }
+            )
+
+        if len(numeric_columns) >= 2:
+            recommendations.append(
+                {
+                    "kind": "scatter",
+                    "title": f"{readable_column_label(numeric_columns[0])} vs {readable_column_label(numeric_columns[1])}",
+                    "chart_type": "scatter",
+                    "table_name": table_name,
+                    "x_column": numeric_columns[0],
+                    "y_column": numeric_columns[1],
+                    "series_column": primary["category_column"],
+                    "why": "The table has at least two numeric columns.",
+                    "next_tool": "correlation_analysis",
+                }
+            )
+
+        if len(numeric_columns) >= 3:
+            recommendations.append(
+                {
+                    "kind": "correlation_matrix",
+                    "title": "Correlation matrix",
+                    "chart_type": "heatmap",
+                    "table_name": table_name,
+                    "numeric_columns": numeric_columns[:12],
+                    "why": "The table has enough numeric columns to compare pairwise relationships.",
+                    "next_tool": "correlation_matrix_analysis",
+                }
+            )
+
+        return {
+            "table_name": table_name,
+            "question": question,
+            "row_count": profile["row_count"],
+            "detected_semantics": primary,
+            "recommendations": recommendations[: max(1, min(max_recommendations, 20))],
+            "caveats": [
+                "Use aggregation before charting repeated time/category rows.",
+                "Normalize rates before comparing cantons with very different population sizes.",
+                "Treat correlations as descriptive, not causal.",
+            ],
+        }
+
+    def suggest_join_keys(
+        self,
+        left_table: str,
+        right_table: str,
+        max_suggestions: int = 10,
+    ) -> dict[str, Any]:
+        """Suggest likely join columns between two local tables."""
+
+        left_profile = self.profile_dataset(left_table, max_columns=80, top_k=5)
+        right_profile = self.profile_dataset(right_table, max_columns=80, top_k=5)
+        suggestions: list[dict[str, Any]] = []
+        for left_column in left_profile["columns"]:
+            for right_column in right_profile["columns"]:
+                score, reasons = self._join_key_score(
+                    left_table,
+                    right_table,
+                    left_column,
+                    right_column,
+                    left_profile["semantics"]["roles"],
+                    right_profile["semantics"]["roles"],
+                )
+                if score > 0:
+                    suggestions.append(
+                        {
+                            "left_column": left_column["name"],
+                            "right_column": right_column["name"],
+                            "score": round(score, 3),
+                            "reasons": reasons,
+                        }
+                    )
+        suggestions.sort(key=lambda item: item["score"], reverse=True)
+        return {
+            "left_table": left_table,
+            "right_table": right_table,
+            "suggestions": suggestions[: max(1, min(max_suggestions, 50))],
+        }
+
+    def compare_table_granularity(
+        self,
+        left_table: str,
+        right_table: str | None = None,
+        dimensions: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Describe row grain and distinct counts for one or two tables."""
+
+        left = self._granularity_summary(left_table, dimensions)
+        right = self._granularity_summary(right_table, dimensions) if right_table else None
+        comparison = None
+        if right:
+            left_roles = left["semantics"]["primary"]
+            right_roles = right["semantics"]["primary"]
+            comparison = {
+                "shared_detected_roles": [
+                    role
+                    for role in ("time_column", "canton_column", "municipality_column")
+                    if left_roles.get(role) and right_roles.get(role)
+                ],
+                "row_count_ratio": round(left["row_count"] / right["row_count"], 6)
+                if right["row_count"]
+                else None,
+                "caveat": "Matching row counts do not guarantee the same grain; inspect distinct dimension combinations.",
+            }
+        return {"left": left, "right": right, "comparison": comparison}
+
+    def can_correlate_tables(
+        self,
+        left_table: str,
+        right_table: str,
+        left_join_column: str | None = None,
+        right_join_column: str | None = None,
+        left_value_column: str | None = None,
+        right_value_column: str | None = None,
+    ) -> dict[str, Any]:
+        """Check whether two tables are ready for a joined correlation."""
+
+        join_suggestions = self.suggest_join_keys(left_table, right_table, max_suggestions=5)
+        best_join = join_suggestions["suggestions"][0] if join_suggestions["suggestions"] else None
+        left_profile = self.profile_dataset(left_table, max_columns=80, top_k=5)
+        right_profile = self.profile_dataset(right_table, max_columns=80, top_k=5)
+        left_join = left_join_column or (best_join or {}).get("left_column")
+        right_join = right_join_column or (best_join or {}).get("right_column")
+        left_metric = left_value_column or left_profile["semantics"]["primary"]["metric_column"]
+        right_metric = right_value_column or right_profile["semantics"]["primary"]["metric_column"]
+        issues: list[str] = []
+        if not left_join or not right_join:
+            issues.append("No join key was detected. Pass join columns explicitly.")
+        if not left_metric:
+            issues.append("No numeric metric was detected in the left table.")
+        if not right_metric:
+            issues.append("No numeric metric was detected in the right table.")
+
+        join_rows = None
+        if not issues:
+            with self.store.connect() as connection:
+                for table in (left_table, right_table):
+                    ensure_table_exists(connection, table)
+                join_rows = connection.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM "{left_table}" l
+                    INNER JOIN "{right_table}" r
+                      ON CAST(l.{quote_identifier(left_join)} AS VARCHAR)
+                       = CAST(r.{quote_identifier(right_join)} AS VARCHAR)
+                    WHERE l.{quote_identifier(left_metric)} IS NOT NULL
+                      AND r.{quote_identifier(right_metric)} IS NOT NULL
+                    """,
+                ).fetchone()[0]
+            if join_rows < 2:
+                issues.append("The selected join and metric columns produce fewer than two complete rows.")
+
+        return {
+            "left_table": left_table,
+            "right_table": right_table,
+            "can_correlate": not issues,
+            "join_columns": {"left": left_join, "right": right_join},
+            "value_columns": {"left": left_metric, "right": right_metric},
+            "join_rows": join_rows,
+            "join_suggestions": join_suggestions["suggestions"],
+            "issues": issues,
+            "recommended_next_tool": "compare_datasets" if not issues else None,
+            "caveats": [
+                "Check whether the two metrics refer to the same time period.",
+                "Use per-capita or rate normalization when comparing canton-level totals.",
+            ],
+        }
+
+    def normalize_canton_codes(
+        self,
+        table_name: str,
+        canton_column: str | None = None,
+        output_table_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a derived table with normalized canton code, abbreviation, and name columns."""
+
+        semantics = self.detect_schema_semantics(table_name)
+        column = canton_column or semantics["primary"]["canton_column"]
+        if not column:
+            raise AnalyticsError("Could not detect a canton column. Pass canton_column explicitly.")
+        output = output_table_name or f"{normalize_identifier(table_name)}_cantons"
+        value_expr = f"UPPER(TRIM(CAST({quote_identifier(column)} AS VARCHAR)))"
+        code_case = canton_case_expression(value_expr, "code")
+        abbr_case = canton_case_expression(value_expr, "abbr")
+        name_case = canton_case_expression(value_expr, "name")
+        with self.store.connect() as connection:
+            ensure_table_exists(connection, table_name)
+            columns = [row[1] for row in connection.execute(f'PRAGMA table_info("{table_name}")').fetchall()]
+            if column not in columns:
+                raise AnalyticsError(f"Unknown canton column '{column}'.")
+            connection.execute(
+                f"""
+                CREATE OR REPLACE TABLE "{output}" AS
+                SELECT *,
+                       {code_case} AS normalized_canton_code,
+                       {abbr_case} AS normalized_canton_abbreviation,
+                       {name_case} AS normalized_canton_name
+                FROM "{table_name}"
+                """
+            )
+            row_count = connection.execute(f'SELECT COUNT(*) FROM "{output}"').fetchone()[0]
+            matched_rows = connection.execute(
+                f'SELECT COUNT(*) FROM "{output}" WHERE normalized_canton_code IS NOT NULL'
+            ).fetchone()[0]
+            columns_out = [row[1] for row in connection.execute(f'PRAGMA table_info("{output}")').fetchall()]
+            self.store._upsert_table_metadata(
+                connection,
+                output,
+                f"normalize-canton:{table_name}",
+                None,
+                f"derived from {table_name}",
+                str(self.settings.database_path),
+                row_count,
+                columns_out,
+            )
+        return {
+            "source_table": table_name,
+            "output_table": output,
+            "canton_column": column,
+            "row_count": row_count,
+            "matched_rows": matched_rows,
+            "match_percent": round(matched_rows * 100.0 / row_count, 2) if row_count else 0.0,
+            "added_columns": [
+                "normalized_canton_code",
+                "normalized_canton_abbreviation",
+                "normalized_canton_name",
+            ],
         }
 
     def answer_from_table(
@@ -780,6 +1072,102 @@ class AnalyticsService:
             result["report"] = self.sessions.render(session_id)
         return result
 
+    def correlation_matrix_analysis(
+        self,
+        table_name: str,
+        numeric_columns: list[str] | None = None,
+        filters: dict[str, Any] | None = None,
+        output_table_name: str | None = None,
+        session_id: str | None = None,
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a long-form Pearson correlation matrix table and optional heatmap."""
+
+        profile = self.profile_dataset(table_name, max_columns=120, top_k=5)
+        available_numeric = [
+            column["name"]
+            for column in profile["columns"]
+            if "metric" in column.get("semantic_roles", []) and column["name"] not in profile["semantics"]["roles"]["time"]
+        ]
+        selected = numeric_columns or available_numeric[:12]
+        if len(selected) < 2:
+            raise AnalyticsError("Need at least two numeric columns for a correlation matrix.")
+        unknown = sorted(set(selected) - set(available_numeric))
+        if unknown:
+            raise AnalyticsError(f"Unknown or non-numeric columns for correlation matrix: {unknown}")
+
+        with self.store.connect() as connection:
+            ensure_table_exists(connection, table_name)
+            table_columns = [row[1] for row in connection.execute(f'PRAGMA table_info("{table_name}")').fetchall()]
+            where_sql, params = build_where(filters or {}, table_columns)
+            select_sql = ", ".join(quote_identifier(column) for column in selected)
+            df = connection.execute(
+                f'SELECT {select_sql} FROM "{table_name}" {where_sql}',
+                params,
+            ).fetchdf()
+
+        numeric_df = df.apply(pd.to_numeric, errors="coerce")
+        usable_columns = [
+            column
+            for column in numeric_df.columns
+            if numeric_df[column].notna().sum() >= 2 and numeric_df[column].nunique(dropna=True) > 1
+        ]
+        if len(usable_columns) < 2:
+            raise AnalyticsError("Need at least two numeric columns with variation for a correlation matrix.")
+        corr = numeric_df[usable_columns].corr(method="pearson")
+        rows = [
+            {
+                "metric_x": left,
+                "metric_y": right,
+                "correlation": None if pd.isna(value) else round(float(value), 6),
+            }
+            for left, values in corr.iterrows()
+            for right, value in values.items()
+        ]
+        output = output_table_name or f"{normalize_identifier(table_name)}_correlation_matrix"
+        matrix_df = pd.DataFrame(rows)
+        with self.store.connect() as connection:
+            connection.register("matrix_df", matrix_df)
+            connection.execute(f'CREATE OR REPLACE TABLE "{output}" AS SELECT * FROM matrix_df')
+            columns_out = [row[1] for row in connection.execute(f'PRAGMA table_info("{output}")').fetchall()]
+            self.store._upsert_table_metadata(
+                connection,
+                output,
+                f"correlation-matrix:{table_name}",
+                None,
+                f"derived from {table_name}",
+                str(self.settings.database_path),
+                len(matrix_df),
+                columns_out,
+            )
+
+        result: dict[str, Any] = {
+            "table_name": table_name,
+            "output_table": output,
+            "numeric_columns": usable_columns,
+            "row_count": len(matrix_df),
+            "rows": dataframe_records(matrix_df),
+            "caveat": "Pairwise Pearson correlations describe linear association only.",
+        }
+        if session_id:
+            result["chart"] = self.sessions.add_chart(
+                session_id,
+                output,
+                title or "Correlation matrix",
+                "heatmap",
+                "metric_x",
+                "metric_y",
+                "correlation",
+                limit=len(matrix_df),
+                column_labels={
+                    "metric_x": "Indicator",
+                    "metric_y": "Indicator",
+                    "correlation": "Pearson r",
+                },
+            )
+            result["report"] = self.sessions.render(session_id)
+        return result
+
     def time_series_analysis(
         self,
         table_name: str,
@@ -988,6 +1376,249 @@ class AnalyticsService:
             "left_table": left_table,
             "right_table": right_table,
             "correlation": corr,
+        }
+
+    def calculate_per_capita_metric(
+        self,
+        numerator_table: str,
+        denominator_table: str,
+        numerator_join_column: str,
+        denominator_join_column: str,
+        numerator_value_column: str,
+        denominator_value_column: str,
+        multiplier: float = 100000.0,
+        output_table_name: str | None = None,
+        session_id: str | None = None,
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        """Join two tables and calculate a normalized rate per denominator."""
+
+        output = output_table_name or (
+            f"per_capita_{normalize_identifier(numerator_table)}_{normalize_identifier(denominator_table)}"
+        )
+        with self.store.connect() as connection:
+            for table in (numerator_table, denominator_table):
+                ensure_table_exists(connection, table)
+            left_columns = [
+                row[1] for row in connection.execute(f'PRAGMA table_info("{numerator_table}")').fetchall()
+            ]
+            right_columns = [
+                row[1] for row in connection.execute(f'PRAGMA table_info("{denominator_table}")').fetchall()
+            ]
+            for column in (numerator_join_column, numerator_value_column):
+                if column not in left_columns:
+                    raise AnalyticsError(f"Unknown numerator table column '{column}'.")
+            for column in (denominator_join_column, denominator_value_column):
+                if column not in right_columns:
+                    raise AnalyticsError(f"Unknown denominator table column '{column}'.")
+
+            connection.execute(
+                f"""
+                CREATE OR REPLACE TABLE "{output}" AS
+                WITH numerator AS (
+                  SELECT CAST({quote_identifier(numerator_join_column)} AS VARCHAR) AS join_value,
+                         SUM({quote_identifier(numerator_value_column)}) AS numerator_value
+                  FROM "{numerator_table}"
+                  WHERE {quote_identifier(numerator_value_column)} IS NOT NULL
+                  GROUP BY 1
+                ),
+                denominator AS (
+                  SELECT CAST({quote_identifier(denominator_join_column)} AS VARCHAR) AS join_value,
+                         SUM({quote_identifier(denominator_value_column)}) AS denominator_value
+                  FROM "{denominator_table}"
+                  WHERE {quote_identifier(denominator_value_column)} IS NOT NULL
+                  GROUP BY 1
+                )
+                SELECT n.join_value,
+                       n.numerator_value,
+                       d.denominator_value,
+                       CASE
+                         WHEN d.denominator_value IS NULL OR d.denominator_value = 0 THEN NULL
+                         ELSE n.numerator_value * ? / d.denominator_value
+                       END AS per_capita_value
+                FROM numerator n
+                INNER JOIN denominator d USING (join_value)
+                ORDER BY per_capita_value DESC NULLS LAST
+                """,
+                [float(multiplier)],
+            )
+            df = connection.execute(f'SELECT * FROM "{output}"').fetchdf()
+            columns_out = [row[1] for row in connection.execute(f'PRAGMA table_info("{output}")').fetchall()]
+            self.store._upsert_table_metadata(
+                connection,
+                output,
+                f"per-capita:{numerator_table}:{denominator_table}",
+                None,
+                f"derived from {numerator_table} and {denominator_table}",
+                str(self.settings.database_path),
+                len(df),
+                columns_out,
+            )
+
+        result: dict[str, Any] = {
+            "output_table": output,
+            "numerator_table": numerator_table,
+            "denominator_table": denominator_table,
+            "join_columns": {
+                "numerator": numerator_join_column,
+                "denominator": denominator_join_column,
+            },
+            "value_columns": {
+                "numerator": numerator_value_column,
+                "denominator": denominator_value_column,
+            },
+            "multiplier": multiplier,
+            "row_count": len(df),
+            "rows": dataframe_records(df.head(100)),
+            "caveat": "This is a normalized rate. Verify the denominator matches the same place and period.",
+        }
+        if session_id:
+            result["chart"] = self.sessions.add_chart(
+                session_id,
+                output,
+                title or f"{readable_column_label(numerator_value_column)} per {int(multiplier):,}",
+                "bar",
+                "join_value",
+                "per_capita_value",
+                limit=100,
+                column_labels={
+                    "join_value": "Join value",
+                    "per_capita_value": f"Rate per {int(multiplier):,}",
+                },
+            )
+            result["report"] = self.sessions.render(session_id)
+        return result
+
+    def _join_key_score(
+        self,
+        left_table: str,
+        right_table: str,
+        left_column: dict[str, Any],
+        right_column: dict[str, Any],
+        left_roles: dict[str, list[str]],
+        right_roles: dict[str, list[str]],
+    ) -> tuple[float, list[str]]:
+        score = 0.0
+        reasons: list[str] = []
+        left_name = left_column["name"]
+        right_name = right_column["name"]
+        left_key = normalize_label_key(left_name)
+        right_key = normalize_label_key(right_name)
+        if left_key == right_key:
+            score += 40
+            reasons.append("normalized column names match")
+        if {left_key, right_key} <= {"canton", "kanton", "kt", "canton_code", "normalized_canton_code"}:
+            score += 35
+            reasons.append("both columns look like canton keys")
+        if {left_key, right_key} <= {"year", "jahr", "annee", "date", "datum"}:
+            score += 25
+            reasons.append("both columns look like time keys")
+
+        left_role_names = set(roles_for_column(left_roles, left_name))
+        right_role_names = set(roles_for_column(right_roles, right_name))
+        role_overlap = (left_role_names & right_role_names) - {"metric"}
+        if role_overlap:
+            score += 15 * len(role_overlap)
+            reasons.append(f"shared semantic roles: {', '.join(sorted(role_overlap))}")
+        if "metric" in left_role_names or "metric" in right_role_names:
+            score -= 20
+            reasons.append("numeric metric columns are usually weak join keys")
+
+        if score > 0:
+            overlap = self._value_overlap(left_table, right_table, left_name, right_name)
+            if overlap["overlap_count"]:
+                score += 40 * overlap["jaccard"]
+                reasons.append(
+                    f"{overlap['overlap_count']} sampled values overlap "
+                    f"(Jaccard {overlap['jaccard']:.2f})"
+                )
+            elif score < 40:
+                score = 0
+                reasons = []
+        return score, reasons
+
+    def _value_overlap(
+        self,
+        left_table: str,
+        right_table: str,
+        left_column: str,
+        right_column: str,
+        limit: int = 300,
+    ) -> dict[str, Any]:
+        left_values = self._distinct_values(left_table, left_column, limit)
+        right_values = self._distinct_values(right_table, right_column, limit)
+        if not left_values or not right_values:
+            return {"overlap_count": 0, "jaccard": 0.0}
+        overlap = left_values & right_values
+        union = left_values | right_values
+        return {
+            "overlap_count": len(overlap),
+            "jaccard": len(overlap) / len(union) if union else 0.0,
+        }
+
+    def _distinct_values(self, table_name: str, column: str, limit: int = 300) -> set[str]:
+        with self.store.connect() as connection:
+            ensure_table_exists(connection, table_name)
+            rows = connection.execute(
+                f"""
+                SELECT DISTINCT TRIM(CAST({quote_identifier(column)} AS VARCHAR)) AS value
+                FROM "{table_name}"
+                WHERE {quote_identifier(column)} IS NOT NULL
+                LIMIT ?
+                """,
+                [max(1, min(limit, 1000))],
+            ).fetchall()
+        return {str(row[0]).strip().upper() for row in rows if str(row[0]).strip()}
+
+    def _granularity_summary(self, table_name: str | None, dimensions: list[str] | None) -> dict[str, Any] | None:
+        if not table_name:
+            return None
+        profile = self.profile_dataset(table_name, max_columns=80, top_k=5)
+        primary = profile["semantics"]["primary"]
+        candidate_dimensions = dimensions or [
+            value
+            for value in (
+                primary["time_column"],
+                primary["canton_column"],
+                primary["municipality_column"],
+                primary["category_column"],
+            )
+            if value
+        ]
+        with self.store.connect() as connection:
+            ensure_table_exists(connection, table_name)
+            columns = [row[1] for row in connection.execute(f'PRAGMA table_info("{table_name}")').fetchall()]
+            unknown = sorted(set(candidate_dimensions) - set(columns))
+            if unknown:
+                raise AnalyticsError(f"Unknown granularity dimensions for '{table_name}': {unknown}")
+            dimension_stats = []
+            for column in candidate_dimensions:
+                distinct_count = connection.execute(
+                    f'SELECT COUNT(DISTINCT {quote_identifier(column)}) FROM "{table_name}"'
+                ).fetchone()[0]
+                dimension_stats.append({"column": column, "distinct_count": distinct_count})
+            duplicate_groups = None
+            if candidate_dimensions:
+                selected = ", ".join(quote_identifier(column) for column in candidate_dimensions)
+                duplicate_groups = connection.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM (
+                      SELECT {selected}, COUNT(*) AS row_count
+                      FROM "{table_name}"
+                      GROUP BY {selected}
+                      HAVING COUNT(*) > 1
+                    )
+                    """
+                ).fetchone()[0]
+        return {
+            "table_name": table_name,
+            "row_count": profile["row_count"],
+            "semantics": profile["semantics"],
+            "dimensions_checked": candidate_dimensions,
+            "dimension_stats": dimension_stats,
+            "duplicate_dimension_groups": duplicate_groups,
+            "dimension_key_unique": duplicate_groups == 0 if duplicate_groups is not None else None,
         }
 
     def generate_citation_pack(
@@ -1220,6 +1851,34 @@ def infer_group_column_from_question(question: str, semantics: dict[str, Any]) -
             if "epoche" in normalized or "type" in normalized or "art" in normalized:
                 return column
     return semantics["primary"]["category_column"]
+
+
+def canton_case_expression(value_expr: str, target: str) -> str:
+    """Build a DuckDB CASE expression for common canton code forms."""
+
+    values: list[str] = []
+    for code, (abbr, name) in CANTON_BY_CODE.items():
+        if target == "code":
+            output = code
+        elif target == "abbr":
+            output = abbr
+        else:
+            output = name
+        matches = sorted({code, code.zfill(2), abbr, name.upper()})
+        escaped_matches = ", ".join(sql_string(match) for match in matches)
+        values.append(f"WHEN {value_expr} IN ({escaped_matches}) THEN {sql_string(output)}")
+    values.append(
+        "WHEN "
+        f"{value_expr} IN ('CH', 'SWITZERLAND', 'SCHWEIZ', 'SUISSE', 'SVIZZERA') "
+        f"THEN {sql_string('CH' if target != 'name' else 'Switzerland')}"
+    )
+    return "CASE " + " ".join(values) + " ELSE NULL END"
+
+
+def sql_string(value: str) -> str:
+    """Return a single-quoted SQL string literal."""
+
+    return "'" + value.replace("'", "''") + "'"
 
 
 def rank_resource(resource: Any) -> dict[str, Any]:
