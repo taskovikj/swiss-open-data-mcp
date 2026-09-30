@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 
-
 COMMON_COLUMN_LABELS = {
     "year": "Year",
     "jahr": "Year",

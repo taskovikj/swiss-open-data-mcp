@@ -15,3 +15,4 @@ def test_cli_parser_accepts_helper_commands():
     assert parser.parse_args(["doctor"]).command == "doctor"
     assert parser.parse_args(["config"]).command == "config"
     assert parser.parse_args(["serve", "--port", "9999"]).port == 9999
+    assert parser.parse_args(["http", "--port", "8001"]).port == 8001

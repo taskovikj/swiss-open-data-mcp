@@ -6,7 +6,10 @@ import html
 import json
 import uuid
 from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path
+from tempfile import NamedTemporaryFile
+from threading import RLock
 from typing import Any
 
 from slugify import slugify
@@ -20,13 +23,25 @@ class SessionError(RuntimeError):
     """Raised when an analysis session cannot be created or updated."""
 
 
+def synchronized(method):
+    """Protect read-modify-write operations on a session manifest."""
+
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
 class SessionService:
     """Manage persistent local interactive analysis sessions."""
 
     def __init__(self, settings: Settings, store: DataStore):
         self.settings = settings
         self.store = store
+        self._lock = RLock()
 
+    @synchronized
     def create_session(
         self,
         title: str,
@@ -58,6 +73,7 @@ class SessionService:
         self._save_manifest(manifest)
         return manifest
 
+    @synchronized
     def list_sessions(self) -> list[dict[str, Any]]:
         """Return all saved sessions."""
 
@@ -80,6 +96,7 @@ class SessionService:
             )
         return sorted(sessions, key=lambda item: item.get("updated_at") or "", reverse=True)
 
+    @synchronized
     def load_session(self, session_id: str) -> dict[str, Any]:
         """Load a session manifest."""
 
@@ -88,6 +105,7 @@ class SessionService:
             raise SessionError(f"Unknown session '{session_id}'.")
         return json.loads(manifest_path.read_text(encoding="utf-8"))
 
+    @synchronized
     def add_chart(
         self,
         session_id: str,
@@ -131,6 +149,7 @@ class SessionService:
         self._touch_and_save(manifest)
         return chart
 
+    @synchronized
     def remove_chart(self, session_id: str, chart_id: str) -> dict[str, Any]:
         """Remove a chart spec from a session."""
 
@@ -142,6 +161,7 @@ class SessionService:
         self._touch_and_save(manifest)
         return {"session_id": session_id, "removed_chart_id": chart_id, "chart_count": len(manifest["charts"])}
 
+    @synchronized
     def update_chart(self, session_id: str, chart_id: str, updates: dict[str, Any]) -> dict[str, Any]:
         """Update selected chart fields."""
 
@@ -164,6 +184,10 @@ class SessionService:
         for chart in manifest.get("charts", []):
             if chart.get("id") == chart_id:
                 chart.update({key: value for key, value in updates.items() if value is not None})
+                if chart["chart_type"] not in {"line", "bar", "scatter", "map", "heatmap"}:
+                    raise SessionError("chart_type must be one of line, bar, scatter, map, heatmap.")
+                if chart["chart_type"] == "heatmap" and not chart.get("series_column"):
+                    raise SessionError("heatmap charts require series_column.")
                 self._validate_table_columns(
                     chart["table_name"],
                     [chart["x_column"], chart["y_column"], chart.get("series_column")],
@@ -183,6 +207,7 @@ class SessionService:
                 return chart
         raise SessionError(f"Unknown chart '{chart_id}' in session '{session_id}'.")
 
+    @synchronized
     def add_analysis(
         self,
         session_id: str,
@@ -206,6 +231,7 @@ class SessionService:
         self._touch_and_save(manifest)
         return analysis
 
+    @synchronized
     def render(self, session_id: str) -> dict[str, Any]:
         """Render the interactive HTML dashboard for a session."""
 
@@ -872,10 +898,18 @@ class SessionService:
 
     def _save_manifest(self, manifest: dict[str, Any]) -> None:
         self._session_dir(manifest["id"]).mkdir(parents=True, exist_ok=True)
-        self._manifest_path(manifest["id"]).write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2, default=str),
-            encoding="utf-8",
-        )
+        target = self._manifest_path(manifest["id"])
+        temporary = None
+        try:
+            with NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=target.parent, suffix=".part", delete=False
+            ) as handle:
+                temporary = Path(handle.name)
+                json.dump(manifest, handle, ensure_ascii=False, indent=2, default=str)
+            temporary.replace(target)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     def _touch_and_save(self, manifest: dict[str, Any]) -> None:
         manifest["updated_at"] = utc_now()

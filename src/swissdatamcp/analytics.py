@@ -6,6 +6,7 @@ import json
 import math
 import re
 import shutil
+import uuid
 import zipfile
 from datetime import UTC, datetime
 from typing import Any
@@ -16,7 +17,13 @@ from slugify import slugify
 from swissdatamcp.config import Settings
 from swissdatamcp.labels import CANTON_BY_CODE, normalize_label_key, readable_column_label
 from swissdatamcp.sessions import SessionService
-from swissdatamcp.store import DataStore, build_where, dataframe_records, ensure_table_exists
+from swissdatamcp.store import (
+    DataStore,
+    build_where,
+    dataframe_records,
+    ensure_table_exists,
+    validate_table_name,
+)
 
 
 class AnalyticsError(RuntimeError):
@@ -229,6 +236,7 @@ class AnalyticsService:
         """Create a normalized copy of a table with safe snake_case column names."""
 
         output = output_table_name or f"{normalize_identifier(table_name)}_clean"
+        validate_table_name(output)
         with self.store.connect() as connection:
             ensure_table_exists(connection, table_name)
             schema_rows = connection.execute(f'PRAGMA table_info("{table_name}")').fetchall()
@@ -557,6 +565,7 @@ class AnalyticsService:
         if not column:
             raise AnalyticsError("Could not detect a canton column. Pass canton_column explicitly.")
         output = output_table_name or f"{normalize_identifier(table_name)}_cantons"
+        validate_table_name(output)
         value_expr = f"UPPER(TRIM(CAST({quote_identifier(column)} AS VARCHAR)))"
         code_case = canton_case_expression(value_expr, "code")
         abbr_case = canton_case_expression(value_expr, "abbr")
@@ -725,7 +734,7 @@ class AnalyticsService:
             time_table = self.time_series_analysis(
                 table_name=table_name,
                 time_column=primary["time_column"],
-                output_table_name=f"{session['id']}_time_series",
+                output_table_name=f"{normalize_identifier(session['id'])}_time_series",
             )
             charts.append(
                 self.sessions.add_chart(
@@ -744,7 +753,7 @@ class AnalyticsService:
             count = self.create_category_count_table(
                 table_name=table_name,
                 category_column=category,
-                output_table_name=f"{session['id']}_{normalize_identifier(category)}_counts",
+                output_table_name=normalize_identifier(f"{session['id']}_{category}_counts"),
                 limit=20,
                 split_commas=True,
             )
@@ -802,6 +811,7 @@ class AnalyticsService:
         """Create a count table for top category values."""
 
         output = output_table_name or f"{normalize_identifier(table_name)}_{normalize_identifier(category_column)}_counts"
+        validate_table_name(output)
         with self.store.connect() as connection:
             ensure_table_exists(connection, table_name)
             columns = [row[1] for row in connection.execute(f'PRAGMA table_info("{table_name}")').fetchall()]
@@ -868,6 +878,7 @@ class AnalyticsService:
         if not lat_col or not lon_col:
             raise AnalyticsError("Could not detect coordinates. Pass latitude_column and longitude_column.")
         output = output_table_name or f"{normalize_identifier(table_name)}_map_layer"
+        validate_table_name(output)
         with self.store.connect() as connection:
             ensure_table_exists(connection, table_name)
             columns = [row[1] for row in connection.execute(f'PRAGMA table_info("{table_name}")').fetchall()]
@@ -1051,6 +1062,7 @@ class AnalyticsService:
         df["residual_y"] = y - df["predicted_y"]
 
         output = output_table_name or f"{normalize_identifier(table_name)}_{normalize_identifier(x_column)}_{normalize_identifier(y_column)}_correlation"
+        validate_table_name(output)
         with self.store.connect() as connection:
             connection.register("correlation_df", df)
             connection.execute(f'CREATE OR REPLACE TABLE "{output}" AS SELECT * FROM correlation_df')
@@ -1166,6 +1178,7 @@ class AnalyticsService:
             for right, value in values.items()
         ]
         output = output_table_name or f"{normalize_identifier(table_name)}_correlation_matrix"
+        validate_table_name(output)
         matrix_df = pd.DataFrame(rows)
         with self.store.connect() as connection:
             connection.register("matrix_df", matrix_df)
@@ -1224,6 +1237,7 @@ class AnalyticsService:
         if aggregation not in {"count", "sum", "avg", "min", "max"}:
             raise AnalyticsError("aggregation must be one of count, sum, avg, min, max.")
         output = output_table_name or f"{normalize_identifier(table_name)}_{normalize_identifier(time_column)}_series"
+        validate_table_name(output)
         with self.store.connect() as connection:
             ensure_table_exists(connection, table_name)
             columns = [row[1] for row in connection.execute(f'PRAGMA table_info("{table_name}")').fetchall()]
@@ -1365,6 +1379,7 @@ class AnalyticsService:
         output = output_table_name or (
             f"compare_{normalize_identifier(left_table)}_{normalize_identifier(right_table)}"
         )
+        validate_table_name(output)
         with self.store.connect() as connection:
             for table in (left_table, right_table):
                 ensure_table_exists(connection, table)
@@ -1437,6 +1452,7 @@ class AnalyticsService:
         output = output_table_name or (
             f"per_capita_{normalize_identifier(numerator_table)}_{normalize_identifier(denominator_table)}"
         )
+        validate_table_name(output)
         with self.store.connect() as connection:
             for table in (numerator_table, denominator_table):
                 ensure_table_exists(connection, table)
@@ -1707,6 +1723,7 @@ class AnalyticsService:
                         "source_url": table.get("source_url"),
                         "local_path": table.get("local_path"),
                         "row_count": table.get("row_count"),
+                        "sha256": metadata.get("sha256"),
                         "accessed_at": table.get("accessed_at") or datetime.now(UTC).date().isoformat(),
                     }
                 )
@@ -1731,6 +1748,7 @@ class AnalyticsService:
                             "resource_id": table.get("resource_id"),
                             "resource_name": metadata.get("resource_name"),
                             "source_url": table.get("source_url"),
+                            "sha256": metadata.get("sha256"),
                             "accessed_at": table.get("accessed_at"),
                         }
                     )
@@ -1741,7 +1759,7 @@ class AnalyticsService:
             "citation_count": len(citations),
             "citations": citations,
         }
-        output = self.settings.outputs_dir / f"citation-pack-{session_id or 'tables'}-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}.json"
+        output = self.settings.outputs_dir / f"citation-pack-{normalize_identifier(session_id or 'tables')}-{uuid.uuid4().hex[:12]}.json"
         output.write_text(json.dumps(pack, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         return {**pack, "path": str(output)}
 
@@ -1753,11 +1771,12 @@ class AnalyticsService:
     ) -> dict[str, Any]:
         """Export a session HTML, manifest, citations, and chart tables as a zip bundle."""
 
+        if not 1 <= max_rows_per_table <= 1000000:
+            raise AnalyticsError("max_rows_per_table must be between 1 and 1000000.")
         manifest = self.sessions.load_session(session_id)
         rendered = self.sessions.render(session_id)
-        bundle_dir = self.settings.outputs_dir / f"{session_id}-bundle"
-        if bundle_dir.exists():
-            shutil.rmtree(bundle_dir)
+        session_id = manifest["id"]
+        bundle_dir = self.settings.outputs_dir / f"{session_id}-bundle-{uuid.uuid4().hex[:12]}"
         bundle_dir.mkdir(parents=True, exist_ok=True)
         session_dir = self.settings.sessions_dir / session_id
         shutil.copy2(session_dir / "index.html", bundle_dir / "index.html")
@@ -1781,9 +1800,7 @@ class AnalyticsService:
                         f'COPY (SELECT * FROM "{table_name}" LIMIT {max(1, max_rows_per_table)}) TO \'{escaped}\' (HEADER, DELIMITER \',\')'
                     )
                     exported_tables.append(str(target))
-        zip_path = self.settings.outputs_dir / f"{session_id}-bundle.zip"
-        if zip_path.exists():
-            zip_path.unlink()
+        zip_path = bundle_dir.with_suffix(".zip")
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for path in bundle_dir.rglob("*"):
                 archive.write(path, path.relative_to(bundle_dir))

@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import duckdb
 import matplotlib
 
 matplotlib.use("Agg")
@@ -15,8 +14,14 @@ from slugify import slugify  # noqa: E402
 
 from swissdatamcp.config import Settings
 from swissdatamcp.models import ChartResult
-from swissdatamcp.store import StoreError, build_where, dataframe_records, ensure_table_exists
-
+from swissdatamcp.store import (
+    DataStore,
+    StoreError,
+    build_where,
+    dataframe_records,
+    ensure_table_exists,
+    quote_identifier,
+)
 
 SUPPORTED_CHART_TYPES = {"line", "bar", "scatter"}
 
@@ -24,8 +29,9 @@ SUPPORTED_CHART_TYPES = {"line", "bar", "scatter"}
 class ChartService:
     """Create local chart image artifacts from DuckDB tables."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, store: DataStore | None = None):
         self.settings = settings
+        self.store = store or DataStore(settings)
 
     def create_chart(
         self,
@@ -45,7 +51,7 @@ class ChartService:
             raise StoreError("At least one y_column is required.")
 
         limit = max(1, min(limit, 5000))
-        with duckdb.connect(str(self.settings.database_path)) as connection:
+        with self.store.connect() as connection:
             ensure_table_exists(connection, table_name)
             available_columns = [
                 row[1] for row in connection.execute(f'PRAGMA table_info("{table_name}")').fetchall()
@@ -54,7 +60,7 @@ class ChartService:
                 if column not in available_columns:
                     raise StoreError(f"Unknown column '{column}' for table '{table_name}'.")
             where_sql, params = build_where(filters or {}, available_columns)
-            selected = ", ".join(f'"{column}"' for column in [x_column, *y_columns])
+            selected = ", ".join(quote_identifier(column) for column in [x_column, *y_columns])
             df = connection.execute(
                 f'SELECT {selected} FROM "{table_name}" {where_sql} LIMIT ?',
                 [*params, limit],
@@ -106,7 +112,7 @@ class ChartService:
     ) -> dict[str, Any]:
         """Return chart-ready data without creating an image."""
 
-        with duckdb.connect(str(self.settings.database_path)) as connection:
+        with self.store.connect() as connection:
             ensure_table_exists(connection, table_name)
             available_columns = [
                 row[1] for row in connection.execute(f'PRAGMA table_info("{table_name}")').fetchall()
@@ -115,7 +121,7 @@ class ChartService:
                 if column not in available_columns:
                     raise StoreError(f"Unknown column '{column}' for table '{table_name}'.")
             where_sql, params = build_where(filters or {}, available_columns)
-            selected = ", ".join(f'"{column}"' for column in [x_column, *y_columns])
+            selected = ", ".join(quote_identifier(column) for column in [x_column, *y_columns])
             df = connection.execute(
                 f'SELECT {selected} FROM "{table_name}" {where_sql} LIMIT ?',
                 [*params, max(1, min(limit, 1000))],

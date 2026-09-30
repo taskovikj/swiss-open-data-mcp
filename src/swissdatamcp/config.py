@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
-
 DEFAULT_CKAN_BASE_URL = "https://ckan.opendata.swiss/api/3/action"
-DEFAULT_USER_AGENT = "swissdatamcp/0.1 (+https://opendata.swiss)"
+DEFAULT_USER_AGENT = "swissdatamcp/0.2 (+https://github.com/taskovikj/swiss-open-data-mcp)"
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,12 @@ class Settings:
     user_agent: str = DEFAULT_USER_AGENT
     request_timeout_seconds: float = 30.0
     max_download_mb: int = 75
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.request_timeout_seconds) or self.request_timeout_seconds <= 0:
+            raise ValueError("SWISSDATAMCP_TIMEOUT_SECONDS must be a positive finite number.")
+        if self.max_download_mb <= 0:
+            raise ValueError("SWISSDATAMCP_MAX_DOWNLOAD_MB must be positive.")
 
 
 def load_settings() -> Settings:
@@ -66,5 +72,6 @@ def ensure_directories(settings: Settings) -> None:
         settings.outputs_dir,
         settings.reports_dir,
         settings.sessions_dir,
+        settings.database_path.parent,
     ):
         directory.mkdir(parents=True, exist_ok=True)

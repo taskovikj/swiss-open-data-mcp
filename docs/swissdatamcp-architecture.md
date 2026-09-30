@@ -11,7 +11,7 @@ The MCP server provides deterministic access to public data, local tables, calcu
 ```text
 MCP client
   |
-  | MCP stdio
+  | MCP stdio or local Streamable HTTP
   v
 swissdatamcp server
   |
@@ -37,7 +37,8 @@ Responsibilities:
 - define MCP resources
 - define reusable prompts
 - convert internal exceptions into MCP tool errors
-- expose a stdio entry point
+- expose stdio and local Streamable HTTP through official SDK 2.x
+- advertise effect annotations, structured outputs, and cache hints
 
 ### Catalog Connector
 
@@ -50,7 +51,8 @@ Responsibilities:
 - call opendata.swiss CKAN Action API
 - search datasets
 - fetch package metadata
-- normalize dataset/resource metadata
+- normalize localized dataset/resource metadata
+- retry transient failures and cache up to 128 responses for five minutes
 
 ### Local Store
 
@@ -65,6 +67,9 @@ Responsibilities:
 - list and inspect local tables
 - safely query local tables with simple filters
 - compute summary statistics
+- verify atomic download cache entries and record content hashes
+- paginate queries and export bounded table snapshots with provenance manifests
+- serialize DuckDB access within one server process
 
 ### Chart Service
 

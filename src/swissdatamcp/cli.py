@@ -45,18 +45,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"swissdatamcp {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    config_parser = subparsers.add_parser("config", help="Print a ready-to-paste MCP config snippet.")
-    config_parser.add_argument("--name", default="swissdatamcp", help="MCP server name in the client config.")
+    config_parser = subparsers.add_parser(
+        "config", help="Print a ready-to-paste MCP config snippet."
+    )
+    config_parser.add_argument(
+        "--name", default="swissdatamcp", help="MCP server name in the client config."
+    )
     config_parser.set_defaults(func=print_config)
 
-    doctor_parser = subparsers.add_parser("doctor", help="Check local paths and installation details.")
-    doctor_parser.add_argument("--name", default="swissdatamcp", help="MCP server name in the client config.")
+    doctor_parser = subparsers.add_parser(
+        "doctor", help="Check local paths and installation details."
+    )
+    doctor_parser.add_argument(
+        "--name", default="swissdatamcp", help="MCP server name in the client config."
+    )
     doctor_parser.set_defaults(func=doctor)
 
-    serve_parser = subparsers.add_parser("serve", help="Serve local reports and sessions over HTTP.")
+    serve_parser = subparsers.add_parser(
+        "serve", help="Serve local reports and sessions over HTTP."
+    )
     serve_parser.add_argument("--host", default="127.0.0.1", help="Host address to bind.")
     serve_parser.add_argument("--port", type=int, default=8787, help="Port to bind.")
     serve_parser.set_defaults(func=serve_reports)
+
+    http_parser = subparsers.add_parser("http", help="Run MCP Streamable HTTP on localhost.")
+    http_parser.add_argument("--port", type=int, default=8000, help="Local port for /mcp.")
+    http_parser.set_defaults(func=serve_mcp_http)
 
     return parser
 
@@ -128,6 +142,28 @@ def serve_reports(args: argparse.Namespace) -> None:
         print("\nStopped.")
     finally:
         server.server_close()
+
+
+def serve_mcp_http(args: argparse.Namespace) -> None:
+    """Serve MCP locally with Host/Origin validation and stateless requests."""
+
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    from swissdatamcp.server import mcp
+
+    if not 1 <= args.port <= 65535:
+        raise SystemExit("port must be between 1 and 65535")
+    mcp.run(
+        transport="streamable-http",
+        host="127.0.0.1",
+        port=args.port,
+        stateless_http=True,
+        json_response=True,
+        transport_security=TransportSecuritySettings(
+            allowed_hosts=[f"127.0.0.1:{args.port}", f"localhost:{args.port}"],
+            allowed_origins=[f"http://127.0.0.1:{args.port}", f"http://localhost:{args.port}"],
+        ),
+    )
 
 
 if __name__ == "__main__":

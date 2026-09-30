@@ -93,3 +93,15 @@ class ReportResult(BaseModel):
     title: str
     table_name: str | None = None
     chart_path: str | None = None
+
+
+class QueryPage(BaseModel):
+    """Machine-readable row page with explicit continuation metadata."""
+
+    table_name: str
+    columns: list[str]
+    row_count: int = Field(ge=0)
+    rows: list[dict[str, Any]]
+    offset: int = Field(ge=0)
+    has_more: bool
+    next_offset: int | None

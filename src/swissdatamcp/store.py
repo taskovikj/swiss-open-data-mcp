@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import NamedTemporaryFile
+from threading import RLock
 from typing import Any
 from urllib.parse import urlparse
 
@@ -16,6 +22,7 @@ from slugify import slugify
 
 from swissdatamcp.config import Settings
 from swissdatamcp.models import AnalysisResult, TableReference
+from swissdatamcp.network import validate_public_url
 
 
 class StoreError(RuntimeError):
@@ -27,47 +34,99 @@ class DataStore:
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        self._lock = RLock()
 
-    def connect(self) -> duckdb.DuckDBPyConnection:
-        """Open a DuckDB connection."""
+    @contextmanager
+    def connect(self) -> Iterator[duckdb.DuckDBPyConnection]:
+        """Serialize database access within this server process."""
 
-        return duckdb.connect(str(self.settings.database_path))
+        with self._lock, duckdb.connect(str(self.settings.database_path)) as connection:
+            yield connection
 
-    async def download_resource(self, url: str, filename_hint: str | None = None) -> Path:
+    async def download_resource(
+        self, url: str, filename_hint: str | None = None, refresh: bool = False
+    ) -> Path:
         """Download a public resource into the local cache."""
 
+        try:
+            await asyncio.wait_for(validate_public_url(url), self.settings.request_timeout_seconds)
+        except (ValueError, TimeoutError) as exc:
+            raise StoreError(str(exc)) from exc
         parsed = urlparse(url)
-        if parsed.scheme not in {"http", "https"}:
-            raise StoreError("Only http(s) resources are supported.")
 
         suffix = Path(parsed.path).suffix
         digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
-        stem = slugify(filename_hint or Path(parsed.path).stem or "resource")
+        stem = slugify(filename_hint or Path(parsed.path).stem or "resource")[:48] or "resource"
         target = self.settings.downloads_dir / f"{stem}-{digest}{suffix or '.dat'}"
-
-        if target.exists() and target.stat().st_size > 0:
-            return target
+        receipt = target.with_suffix(target.suffix + ".sha256")
 
         max_bytes = self.settings.max_download_mb * 1024 * 1024
-        total = 0
-        async with httpx.AsyncClient(
-            headers={"User-Agent": self.settings.user_agent},
-            timeout=self.settings.request_timeout_seconds,
-            follow_redirects=True,
-        ) as client:
-            async with client.stream("GET", url) as response:
-                response.raise_for_status()
-                with target.open("wb") as handle:
-                    async for chunk in response.aiter_bytes():
-                        total += len(chunk)
-                        if total > max_bytes:
-                            target.unlink(missing_ok=True)
-                            raise StoreError(
-                                f"Download exceeds limit of {self.settings.max_download_mb} MB."
-                            )
-                        handle.write(chunk)
+        if (
+            not refresh
+            and target.exists()
+            and receipt.exists()
+            and 0 < target.stat().st_size <= max_bytes
+        ):
+            with target.open("rb") as handle:
+                actual_hash = hashlib.file_digest(handle, "sha256").hexdigest()
+            if actual_hash == receipt.read_text(encoding="ascii").strip():
+                return target
 
-        return target
+        temporary: Path | None = None
+        try:
+            async with httpx.AsyncClient(
+                headers={"User-Agent": self.settings.user_agent},
+                timeout=self.settings.request_timeout_seconds,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                current_url = url
+                for _ in range(6):
+                    async with client.stream("GET", current_url) as response:
+                        if response.is_redirect:
+                            location = response.headers.get("location")
+                            if not location:
+                                raise StoreError("Resource redirect has no Location header.")
+                            next_url = str(response.url.join(location))
+                            await asyncio.wait_for(
+                                validate_public_url(next_url), self.settings.request_timeout_seconds
+                            )
+                            if (
+                                urlparse(current_url).scheme == "https"
+                                and urlparse(next_url).scheme != "https"
+                            ):
+                                raise StoreError(
+                                    "Resource redirect cannot downgrade HTTPS to HTTP."
+                                )
+                            current_url = next_url
+                            continue
+                        response.raise_for_status()
+                        length = response.headers.get("content-length")
+                        if length and int(length) > max_bytes:
+                            raise StoreError("Download exceeds configured size limit.")
+                        total = 0
+                        with NamedTemporaryFile(
+                            mode="wb", dir=self.settings.downloads_dir, suffix=".part", delete=False
+                        ) as handle:
+                            temporary = Path(handle.name)
+                            async for chunk in response.aiter_bytes():
+                                total += len(chunk)
+                                if total > max_bytes:
+                                    raise StoreError("Download exceeds configured size limit.")
+                                handle.write(chunk)
+                        if total == 0:
+                            raise StoreError("Resource returned an empty download.")
+                        with temporary.open("rb") as handle:
+                            checksum = hashlib.file_digest(handle, "sha256").hexdigest()
+                        temporary.replace(target)
+                        receipt.write_text(checksum, encoding="ascii")
+                        return target
+                raise StoreError("Resource exceeded the redirect limit.")
+        except (httpx.HTTPError, ValueError, TimeoutError) as exc:
+            raise StoreError(f"Resource download failed: {exc}") from exc
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     def load_file_as_table(
         self,
@@ -85,18 +144,19 @@ class DataStore:
             raise StoreError(f"File does not exist: {path}")
 
         name = table_name or make_table_name(dataset_id or path.stem, resource_id or path.stem)
+        validate_table_name(name)
         suffix = path.suffix.lower()
         normalized_hint = (format_hint or "").lower().lstrip(".")
         escaped_path = str(path).replace("'", "''")
 
         if suffix in {".csv", ".tsv", ".txt"} or normalized_hint in {"csv", "tsv", "txt"}:
-            read_expr = f"read_csv_auto('{escaped_path}', header=true, ignore_errors=true)"
+            read_expr = f"read_csv_auto('{escaped_path}', header=true)"
         elif suffix in {".json", ".jsonl", ".ndjson"} or normalized_hint in {
             "json",
             "jsonl",
             "ndjson",
         }:
-            read_expr = f"read_json_auto('{escaped_path}', ignore_errors=true)"
+            read_expr = f"read_json_auto('{escaped_path}')"
         elif suffix in {".parquet"} or normalized_hint == "parquet":
             read_expr = f"read_parquet('{escaped_path}')"
         else:
@@ -105,10 +165,19 @@ class DataStore:
                 "Supported: CSV, TSV, JSON, JSONL, Parquet."
             )
 
+        with path.open("rb") as handle:
+            checksum = hashlib.file_digest(handle, "sha256").hexdigest()
+        metadata = {
+            **(metadata or {}),
+            "sha256": checksum,
+        }
         with self.connect() as connection:
+            connection.begin()
             connection.execute(f'CREATE OR REPLACE TABLE "{name}" AS SELECT * FROM {read_expr}')
             row_count = connection.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
-            columns = [row[1] for row in connection.execute(f'PRAGMA table_info("{name}")').fetchall()]
+            columns = [
+                row[1] for row in connection.execute(f'PRAGMA table_info("{name}")').fetchall()
+            ]
             self._upsert_table_metadata(
                 connection,
                 name,
@@ -120,6 +189,7 @@ class DataStore:
                 columns,
                 metadata,
             )
+            connection.commit()
 
         return TableReference(
             table_name=name,
@@ -200,14 +270,18 @@ class DataStore:
         select_columns: list[str] | None = None,
         filters: dict[str, Any] | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> dict[str, Any]:
         """Run a safe SELECT over a local table using simple equality/range filters."""
 
         limit = max(1, min(limit, 1000))
+        if offset < 0:
+            raise StoreError("offset must be non-negative.")
         with self.connect() as connection:
             ensure_table_exists(connection, table_name)
             available_columns = [
-                row[1] for row in connection.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+                row[1]
+                for row in connection.execute(f'PRAGMA table_info("{table_name}")').fetchall()
             ]
             selected = select_columns or available_columns
             for column in selected:
@@ -215,16 +289,86 @@ class DataStore:
                     raise StoreError(f"Unknown column '{column}' for table '{table_name}'.")
 
             where_sql, params = build_where(filters or {}, available_columns)
-            select_sql = ", ".join(f'"{column}"' for column in selected)
-            query = f'SELECT {select_sql} FROM "{table_name}" {where_sql} LIMIT ?'
-            df = connection.execute(query, [*params, limit]).fetchdf()
+            select_sql = ", ".join(quote_identifier(column) for column in selected)
+            query = f'SELECT {select_sql} FROM "{table_name}" {where_sql} LIMIT ? OFFSET ?'
+            df = connection.execute(query, [*params, limit + 1, offset]).fetchdf()
+            has_more = len(df) > limit
+            df = df.head(limit)
             row_count = len(df)
         return {
             "table_name": table_name,
             "columns": list(df.columns),
             "row_count": row_count,
             "rows": dataframe_records(df),
+            "offset": offset,
+            "has_more": has_more,
+            "next_offset": offset + row_count if has_more else None,
         }
+
+    def export_table(
+        self,
+        table_name: str,
+        format: str = "csv",
+        filters: dict[str, Any] | None = None,
+        max_rows: int = 100000,
+    ) -> dict[str, Any]:
+        """Export a bounded table snapshot with a hash and provenance manifest."""
+
+        options = {
+            "csv": "FORMAT CSV, HEADER TRUE",
+            "json": "FORMAT JSON, ARRAY TRUE",
+            "parquet": "FORMAT PARQUET",
+        }
+        if format not in options:
+            raise StoreError("format must be csv, json, or parquet.")
+        if not 1 <= max_rows <= 1000000:
+            raise StoreError("max_rows must be between 1 and 1000000.")
+        export_id = uuid.uuid4().hex
+        target = self.settings.outputs_dir / f"export-{export_id}.{format}"
+        temporary = target.with_suffix(".part")
+        escaped_path = str(temporary).replace("'", "''")
+        try:
+            with self.connect() as connection:
+                ensure_table_exists(connection, table_name)
+                columns = [
+                    row[1]
+                    for row in connection.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+                ]
+                where, params = build_where(filters or {}, columns)
+                total = connection.execute(
+                    f'SELECT COUNT(*) FROM "{table_name}" {where}', params
+                ).fetchone()[0]
+                connection.execute(
+                    f"COPY (SELECT * FROM {quote_identifier(table_name)} {where} LIMIT {max_rows}) "
+                    f"TO '{escaped_path}' ({options[format]})",
+                    params,
+                )
+                source = next(
+                    (table for table in self.list_tables() if table["table_name"] == table_name), {}
+                )
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        with target.open("rb") as handle:
+            checksum = hashlib.file_digest(handle, "sha256").hexdigest()
+        manifest = {
+            "export_id": export_id,
+            "table_name": table_name,
+            "format": format,
+            "path": str(target),
+            "row_count": min(total, max_rows),
+            "total_matching_rows": total,
+            "truncated": total > max_rows,
+            "filters": filters or {},
+            "sha256": checksum,
+            "created_at": datetime.now(UTC).isoformat(),
+            "source": source,
+            "resource_uri": f"swissdatamcp://export/{export_id}",
+        }
+        (self.settings.outputs_dir / f"export-{export_id}.manifest.json").write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False, default=str), encoding="utf-8"
+        )
+        return manifest
 
     def calculate_change(
         self,
@@ -250,7 +394,8 @@ class DataStore:
         with self.connect() as connection:
             ensure_table_exists(connection, table_name)
             columns = [
-                row[1] for row in connection.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+                row[1]
+                for row in connection.execute(f'PRAGMA table_info("{table_name}")').fetchall()
             ]
             for column in (group_column, time_column, value_column):
                 if column not in columns:
@@ -262,11 +407,11 @@ class DataStore:
             df = connection.execute(
                 f'''
                 WITH scoped AS (
-                  SELECT "{group_column}" AS group_value,
-                         "{time_column}" AS time_value,
-                         "{value_column}" AS metric_value
+                  SELECT {quote_identifier(group_column)} AS group_value,
+                         {quote_identifier(time_column)} AS time_value,
+                         {quote_identifier(value_column)} AS metric_value
                   FROM "{table_name}"
-                  WHERE "{time_column}" IN (?, ?){extra_where}
+                  WHERE {quote_identifier(time_column)} IN (?, ?){extra_where}
                 ),
                 pivoted AS (
                   SELECT group_value,
@@ -319,7 +464,10 @@ class DataStore:
             numeric_columns = [
                 row[1]
                 for row in columns_info
-                if any(token in row[2].upper() for token in ("INT", "DOUBLE", "FLOAT", "DECIMAL", "REAL"))
+                if any(
+                    token in row[2].upper()
+                    for token in ("INT", "DOUBLE", "FLOAT", "DECIMAL", "REAL")
+                )
             ]
             text_columns = [column for column in columns if column not in numeric_columns]
             row_count = connection.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
@@ -335,10 +483,10 @@ class DataStore:
                 stats = connection.execute(
                     f'''
                     SELECT
-                      MIN("{column}") AS min_value,
-                      MAX("{column}") AS max_value,
-                      AVG("{column}") AS avg_value,
-                      COUNT("{column}") AS non_null_count
+                      MIN({quote_identifier(column)}) AS min_value,
+                      MAX({quote_identifier(column)}) AS max_value,
+                      AVG({quote_identifier(column)}) AS avg_value,
+                      COUNT({quote_identifier(column)}) AS non_null_count
                     FROM "{table_name}"
                     '''
                 ).fetchone()
@@ -358,13 +506,13 @@ class DataStore:
                         raise StoreError(f"Unknown value column '{metric}'.")
                     grouped_df = connection.execute(
                         f'''
-                        SELECT "{group_by}" AS group_value,
+                        SELECT {quote_identifier(group_by)} AS group_value,
                                COUNT(*) AS row_count,
-                               AVG("{metric}") AS avg_value,
-                               MIN("{metric}") AS min_value,
-                               MAX("{metric}") AS max_value
+                               AVG({quote_identifier(metric)}) AS avg_value,
+                               MIN({quote_identifier(metric)}) AS min_value,
+                               MAX({quote_identifier(metric)}) AS max_value
                         FROM "{table_name}"
-                        GROUP BY "{group_by}"
+                        GROUP BY {quote_identifier(group_by)}
                         ORDER BY row_count DESC
                         LIMIT 50
                         '''
@@ -482,11 +630,29 @@ def parse_metadata(metadata_json: str | None) -> dict[str, Any]:
 def ensure_table_exists(connection: duckdb.DuckDBPyConnection, table_name: str) -> None:
     """Raise if a table is not present."""
 
+    validate_table_name(table_name)
     exists = connection.execute(
         "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?", [table_name]
     ).fetchone()[0]
     if not exists:
         raise StoreError(f"Unknown table '{table_name}'. Use list_local_tables first.")
+
+
+def validate_table_name(name: str) -> None:
+    """Keep caller-controlled names out of SQL syntax and internal metadata."""
+
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", name):
+        raise StoreError(
+            "Table names must use letters, digits, underscores and start with a letter."
+        )
+    if name.lower().startswith("swissdatamcp_"):
+        raise StoreError("The swissdatamcp_ table prefix is reserved for internal metadata.")
+
+
+def quote_identifier(value: str) -> str:
+    """Escape a source column name, including embedded double quotes."""
+
+    return '"' + value.replace('"', '""') + '"'
 
 
 def build_where(filters: dict[str, Any], available_columns: list[str]) -> tuple[str, list[Any]]:
@@ -520,26 +686,33 @@ def build_where(filters: dict[str, Any], available_columns: list[str]) -> tuple[
                     "lte": "<=",
                 }.get(operator)
                 if operator == "contains":
-                    clauses.append(f'CAST("{column}" AS VARCHAR) ILIKE ?')
+                    clauses.append(f"CAST({quote_identifier(column)} AS VARCHAR) ILIKE ?")
                     params.append(f"%{operand}%")
                 elif operator in {"in", "not_in"}:
                     if not isinstance(operand, list) or not operand:
                         raise StoreError(f"Filter operator '{operator}' requires a non-empty list.")
                     placeholders = ", ".join("?" for _ in operand)
                     not_sql = "NOT " if operator == "not_in" else ""
-                    clauses.append(f'"{column}" {not_sql}IN ({placeholders})')
+                    clauses.append(f"{quote_identifier(column)} {not_sql}IN ({placeholders})")
                     params.extend(operand)
                 else:
-                    clauses.append(f'"{column}" {sql_operator} ?')
+                    if operand is None and operator in {"eq", "ne"}:
+                        not_sql = "NOT " if operator == "ne" else ""
+                        clauses.append(f"{quote_identifier(column)} IS {not_sql}NULL")
+                        continue
+                    clauses.append(f"{quote_identifier(column)} {sql_operator} ?")
                     params.append(operand)
         elif isinstance(value, list):
             if not value:
                 raise StoreError(f"Filter list for '{column}' must not be empty.")
             placeholders = ", ".join("?" for _ in value)
-            clauses.append(f'"{column}" IN ({placeholders})')
+            clauses.append(f"{quote_identifier(column)} IN ({placeholders})")
             params.extend(value)
         else:
-            clauses.append(f'"{column}" = ?')
+            if value is None:
+                clauses.append(f"{quote_identifier(column)} IS NULL")
+                continue
+            clauses.append(f"{quote_identifier(column)} = ?")
             params.append(value)
     if not clauses:
         return "", []
@@ -549,5 +722,4 @@ def build_where(filters: dict[str, Any], available_columns: list[str]) -> tuple[
 def dataframe_records(df: Any) -> list[dict[str, Any]]:
     """Convert a dataframe to JSON-friendly records."""
 
-    records = df.to_dict(orient="records")
-    return json.loads(json.dumps(records, default=str))
+    return json.loads(df.to_json(orient="records", date_format="iso", double_precision=15))
