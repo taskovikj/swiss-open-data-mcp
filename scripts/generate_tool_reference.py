@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -25,7 +26,9 @@ async def render() -> str:
             effects += "; may access public network sources"
         if hint.destructive_hint:
             effects += "; may replace or remove existing local state"
-        lines.extend([f"## `{tool.name}`", "", tool.description or "", "", effects + ".", ""])
+        lines.extend([
+            f"## `{tool.name}`", "", inspect.cleandoc(tool.description or ""), "", effects + ".", ""
+        ])
         required = set(tool.input_schema.get("required", []))
         params = tool.input_schema.get("properties", {})
         if params:
