@@ -223,7 +223,6 @@ May write local files or tables.
 Create a local PNG chart from a DuckDB table.
 
     Supported chart types: line, bar, scatter.
-    
 
 May write local files or tables; may replace or remove existing local state.
 
@@ -300,7 +299,6 @@ Save CSV/JSON/Parquet, source provenance, and SHA-256 to the local outputs folde
 
     max_rows caps the export at 1,000,000 rows. The result reports truncation
     and links to an MCP resource containing the export manifest.
-    
 
 May write local files or tables.
 
@@ -431,7 +429,6 @@ Download a dataset resource and load it into local DuckDB.
     Supports CSV, TSV, JSON, JSONL, NDJSON, and Parquet resources. Use
     list_dataset_resources first when the best resource is unclear. Set refresh
     to true to re-download an updated source instead of using the verified cache.
-    
 
 May write local files or tables; may access public network sources; may replace or remove existing local state.
 
@@ -522,7 +519,6 @@ Run a safe SELECT over a local DuckDB table.
     {"column": "exact value"} or {"column": {"gte": 2000, "lte": 2024}}.
     Supported operators: eq, ne, gt, gte, lt, lte, contains, in, not_in.
     Follow next_offset to read the next page; null filters match SQL NULL.
-    
 
 Reads data.
 
@@ -585,7 +581,6 @@ Search opendata.swiss with post-filters for format and license.
 
     Use this when a normal keyword search returns too many weak candidates.
     required_format can be values like CSV, JSON, PARQUET, GEOJSON, WFS, or WMS.
-    
 
 Reads data; may access public network sources.
 
@@ -606,7 +601,6 @@ Search opendata.swiss datasets by keyword.
 
     Use this first when the user asks for Swiss public data. The result is
     catalog metadata, not the actual statistical values.
-    
 
 Reads data; may access public network sources.
 

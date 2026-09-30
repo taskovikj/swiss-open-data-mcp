@@ -36,7 +36,7 @@ async def render() -> str:
             lines.append("")
         else:
             lines.extend(["No parameters.", ""])
-    return "\n".join(lines)
+    return "\n".join(line.rstrip() for line in lines)
 
 
 def main() -> None:
